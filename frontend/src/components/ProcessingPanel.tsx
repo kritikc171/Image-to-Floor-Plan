@@ -13,7 +13,7 @@ export function ProcessingPanel(props: { fileName: string }) {
       <p className="processing__file">{props.fileName}</p>
       <p className="processing__hint">
         This usually takes a few seconds. You can close this page and come
-        back — the result is not stored long-term.
+        back; the result is not stored long-term.
       </p>
     </section>
   );

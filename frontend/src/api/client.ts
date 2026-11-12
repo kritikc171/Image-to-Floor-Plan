@@ -124,13 +124,17 @@ export interface SpatialObject {
   id: string;
   type: string;
   label: string | null;
+  image_bbox: { x_min: number; y_min: number; x_max: number; y_max: number } | null;
   position: { x: number; y: number } | null;
   orientation: number | null;
   dimensions: Record<string, number> | null;
-  evidence_status: EvidenceStatus;
   confidence: number | null;
+  placement_confidence: number | null;
+  evidence_status: EvidenceStatus;
   evidence_source: string[];
   uncertainty_reason: string | null;
+  footprint: { width: number; depth: number; approximate: boolean; basis: string } | null;
+  layout_issues: string[] | null;
 }
 
 export interface Opening {
@@ -152,6 +156,7 @@ export interface Provenance {
   reasoning_provider: string;
   depth_method: string;
   feature_method: string;
+  detection_model: string | null;
   generated_views_used: number;
   model_name: string | null;
 }

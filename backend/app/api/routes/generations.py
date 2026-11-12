@@ -6,7 +6,7 @@ import asyncio
 import uuid
 
 from fastapi import APIRouter, File, Request, Response, UploadFile, Header
-
+from pydantic import BaseModel, Field
 from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import logger
@@ -16,6 +16,9 @@ from app.services.artifacts import ARTIFACT_FLOORPLAN, artifact_store
 from app.services.image_validation import validate_and_normalize
 from app.services.jobs import job_store
 from app.services.pipeline import run_pipeline
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
 
 router = APIRouter(tags=["generations"])
 
@@ -106,3 +109,51 @@ async def get_floorplan(job_id: str):
         raise
     return Response(content=png, media_type="image/png",
                     headers={"Content-Disposition": f'inline; filename="{job_id}-floorplan.png"'})
+
+
+@router.post("/generations/{job_id}/ask")
+async def ask_generation(job_id: str, body: AskRequest):
+    job = job_store.get(job_id)
+    if job is None:
+        raise AppError(ErrorCode.JOB_NOT_FOUND, "Unknown job.", status_code=404)
+    if job.status != JobStatus.COMPLETED or job.result is None:
+        raise AppError(ErrorCode.ARTIFACT_UNAVAILABLE, "Floor plan is not ready yet.", status_code=409)
+    hyp = job.result.hypothesis
+    objs = hyp.objects
+    q = body.question.lower()
+    # counts
+    if "how many" in q:
+        # by class
+        for cls in ["chair", "bed", "sofa", "couch", "table", "tv"]:
+            if cls in q:
+                n = sum(1 for o in objs if cls in (o.label or o.type or "").lower())
+                return {"answer": f"There are {n} {cls}(s) detected.", "generation_id": job_id}
+        return {"answer": f"There are {len(objs)} detected objects in total.", "generation_id": job_id}
+    if "what furniture" in q or "what objects" in q or "list" in q:
+        names = [o.label or o.type for o in objs]
+        return {"answer": "Detected objects: " + (", ".join(names) if names else "none") + ".", "generation_id": job_id}
+    if "position" in q or "where" in q:
+        for o in objs:
+            if (o.label or o.type or "").lower() in q:
+                if o.position is None:
+                    return {"answer": f"{o.label or o.type} has no reliable position estimate.", "generation_id": job_id}
+                return {"answer": f"{o.label or o.type} is at approximate plan coordinates ({o.position.x:.2f}, {o.position.y:.2f}).", "generation_id": job_id}
+        return {"answer": "Please specify which object you mean.", "generation_id": job_id}
+    if "confidence" in q:
+        for o in objs:
+            if (o.label or o.type or "").lower() in q:
+                return {"answer": f"{o.label or o.type} confidence is {o.confidence if o.confidence is not None else 'unknown'}.", "generation_id": job_id}
+        return {"answer": "Please specify which object you mean.", "generation_id": job_id}
+    if "uncertain" in q:
+        names = [o.label or o.type for o in objs if o.evidence_status.value == "UNCERTAIN" or o.position is None]
+        return {"answer": "Objects with uncertain positions: " + (", ".join(names) if names else "none") + ".", "generation_id": job_id}
+    if "observed" in q:
+        names = [o.label or o.type for o in objs if o.evidence_status.value == "OBSERVED"]
+        return {"answer": "Directly observed objects: " + (", ".join(names) if names else "none") + ".", "generation_id": job_id}
+    if "overlap" in q or "collid" in q:
+        return {"answer": "Overlap validation is performed during layout; check the JSON for details.", "generation_id": job_id}
+    if "limitation" in q:
+        return {"answer": " ".join(hyp.uncertainty.assumptions + hyp.uncertainty.open_questions), "generation_id": job_id}
+    if "why" in q:
+        return {"answer": "Placement is based on detected image position and estimated depth; detailed reasoning may be unavailable.", "generation_id": job_id}
+    return {"answer": "I can answer counts, positions, confidence, uncertain/observed objects, and limitations from this floor plan.", "generation_id": job_id}

@@ -5,6 +5,8 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import List
 
+from pydantic import field_validator
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
@@ -40,7 +42,7 @@ class Settings(BaseSettings):
     max_image_pixels: int = 4096  # per-dimension cap
 
     # CORS
-    cors_origins: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # Artifacts
     artifact_ttl_seconds: int = 3600

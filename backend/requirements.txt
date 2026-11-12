@@ -9,6 +9,8 @@ langgraph==1.2.12
 langchain-core==1.6.6
 groq==1.7.0
 httpx==0.28.1
+torch==2.14.1
+torchvision==0.29.1
 
 # Test dependencies
 pytest==9.1.1

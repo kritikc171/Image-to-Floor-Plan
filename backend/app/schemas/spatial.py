@@ -3,10 +3,29 @@ pipeline, reasoning, renderer, and API.
 
 Coordinate conventions
 ----------------------
-- ``ImagePoint``: pixel coordinates, origin top-left, x right, y down.
+- ``ImagePixel``: pixel coordinates, origin top-left, x right, y down.
+- ``NormalizedImage``: x/y in [0, 1], origin top-left of the image.
+- ``GroundPoint``: inverse-perspective (ground-plane) projection units.
+  X right, Y into the scene (away from camera). Arbitrary units, not metric.
 - ``PlanPoint``: normalized floor-plan coordinates in [0, 1], origin
-  top-left of the plan.
+  top-left of the plan, x right, y down.
+- ``CanvasPixel``: renderer output pixels, origin top-left.
 - Depth is a unitless relative estimate (larger = farther), never metric.
+
+Image-space coordinates are never passed to the architectural renderer;
+every crossing of coordinate spaces is an explicit transformation.
+
+Evidence statuses
+-----------------
+OBSERVED  — directly supported by the photograph (e.g. a detector hit).
+INFERRED  — estimated from visible evidence under stated assumptions.
+GENERATED — derived from an AI-generated candidate view (not used here).
+UNCERTAIN — not enough evidence; position/dimensions unknown.
+
+Precedence: OBSERVED > INFERRED > GENERATED > UNCERTAIN.
+Detection and spatial placement are different concepts: an object whose
+class is OBSERVED may still have a floor position that is INFERRED or
+UNCERTAIN. Physical dimensions are UNCERTAIN unless genuinely measured.
 """
 
 from __future__ import annotations
@@ -73,28 +92,83 @@ class SpatialObject(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     type: str = Field(min_length=1, max_length=64)
     label: Optional[str] = None
-    position: Optional[PlanPoint] = None
+    image_bbox: Optional[BoundingBox] = None  # normalized image coordinates (detections)
+    position: Optional[PlanPoint] = None  # normalized plan centroid of the footprint
     orientation: Optional[float] = None  # radians, 0 = facing "down-plan"
     dimensions: Optional[dict] = None  # only when genuinely known (rare)
+    dimensions_confidence: Optional[float] = Field(
+        default=None, ge=0, le=1
+    )  # confidence in ``dimensions``
+    footprint: Optional[dict] = None  # approximate plan-space {"width","depth","approximate":true}
+    footprint_polygon: Optional[List[PlanPoint]] = None  # top-down footprint corners, plan space
+    footprint_confidence: Optional[float] = Field(
+        default=None, ge=0, le=1
+    )  # confidence in the footprint estimate
+    ground_contact: Optional[PlanPoint] = None  # projected bbox bottom-centre, if available
+    ground_confidence: Optional[float] = Field(
+        default=None, ge=0, le=1
+    )  # confidence in the projected contact point
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)  # detection strength
+    placement_confidence: Optional[float] = Field(default=None, ge=0, le=1)
     evidence_status: EvidenceStatus
-    confidence: Optional[float] = Field(default=None, ge=0, le=1)
     evidence_source: List[str] = Field(default_factory=list)
     uncertainty_reason: Optional[str] = None
+    # Optional layout-validation notes (never fabricated measurements).
+    layout_issues: Optional[List[str]] = Field(default=None)
 
 
-class RoomBoundary(BaseModel):
-    polygon: Optional[List[PlanPoint]] = None
+class WallSegment(BaseModel):
+    """One wall of the estimated room perimeter.
+
+    ``start`` and ``end`` are plan-space points; the segment connects them.
+    ``thickness`` is normalized plan width of the wall.
+    """
+
+    id: str = Field(min_length=1, max_length=64)
+    start: PlanPoint
+    end: PlanPoint
+    thickness: float = Field(default=0.04, ge=0, le=0.2)
+    wall_type: str = Field(default="uncertain")  # "interior" | "exterior" | "uncertain"
     evidence_status: EvidenceStatus
     uncertainty_reason: Optional[str] = None
 
 
 class Opening(BaseModel):
-    """Door or window candidate."""
+    """Door or window candidate located on a wall segment."""
 
     id: str = Field(min_length=1, max_length=64)
     kind: str  # "door" | "window" | "opening"
-    side: Optional[str] = None
-    position: Optional[PlanPoint] = None
+    side: Optional[str] = None  # which wall side: "north" | "south" | "east" | "west" | null
+    position: Optional[PlanPoint] = None  # plan point on the wall centreline
+    width: Optional[float] = Field(default=None, ge=0, le=1)  # opening width along the wall
+    swing: Optional[str] = Field(
+        default=None
+    )  # "inward" | "outward" | "left" | "right" | null
+    swing_degrees: Optional[float] = Field(default=None, ge=0, le=180)
+    wall_id: Optional[str] = None  # references WallSegment.id
+    evidence_status: EvidenceStatus
+    uncertainty_reason: Optional[str] = None
+
+
+class RoomGeometry(BaseModel):
+    """Coherent room perimeter represented as connected wall segments."""
+
+    perimeter: Optional[List[PlanPoint]] = None  # closed ring, plan space
+    corners: Optional[List[PlanPoint]] = None  # room corners
+    walls: List[WallSegment] = Field(default_factory=list)
+    doors: List[Opening] = Field(default_factory=list)
+    windows: List[Opening] = Field(default_factory=list)
+    evidence_status: EvidenceStatus
+    uncertainty_reason: Optional[str] = None
+    rectangular_assumption: bool = Field(
+        default=False, description="True when corners were snapped to a rectangle"
+    )
+
+
+class RoomBoundary(BaseModel):
+    """Backward-compatible room outline (the projected visible floor region)."""
+
+    polygon: Optional[List[PlanPoint]] = None
     evidence_status: EvidenceStatus
     uncertainty_reason: Optional[str] = None
 
@@ -109,6 +183,7 @@ class Provenance(BaseModel):
     reasoning_provider: str  # "groq" | "deterministic-fallback"
     depth_method: str
     feature_method: str
+    detection_model: Optional[str] = None  # object detector used, if any
     generated_views_used: int = Field(ge=0, le=4)
     model_name: Optional[str] = None
 
@@ -118,6 +193,7 @@ class SpatialHypothesis(BaseModel):
 
     schema_version: str = SCHEMA_VERSION
     room_boundary: RoomBoundary
+    room_geometry: Optional[RoomGeometry] = None
     objects: List[SpatialObject] = Field(default_factory=list)
     openings: List[Opening] = Field(default_factory=list)
     uncertainty: UncertaintySummary
