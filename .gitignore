@@ -5,11 +5,12 @@ __pycache__/
 .venv/
 venv/
 env/
+.env
 .pytest_cache/
 **/.pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
+.env.*
 # Backend runtime
 backend/.env
 backend/.pytest_cache/
