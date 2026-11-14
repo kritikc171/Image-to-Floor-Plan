@@ -43,7 +43,7 @@ from app.services.footprint import footprint_for, prior_for
 from app.services.floorplane import FloorPlaneResult
 from app.services import layout
 from app.services.room_geometry import build_room_geometry
-from app.services.features import FeatureExtractionResult, VisualEvidence
+from app.services.features import FeatureExtractionResult, FLOOR_LEVEL_MARGIN, VisualEvidence
 
 # Map classical geometric labels to the closest supported furniture class
 # when no detector label is available. Approximations, not claims.
@@ -85,7 +85,7 @@ def _ground_confidence(ev: VisualEvidence, horizon_norm: float, height: int) -> 
     """Heuristic confidence in the projected ground-contact point."""
     if not ev.floor_level:
         return 0.0
-    margin = ev.bbox[3] - (horizon_norm + 0.12)
+    margin = ev.bbox[3] - (horizon_norm + FLOOR_LEVEL_MARGIN)
     depth_score = min(max(margin * 2.0, 0.0), 1.0)
     size_score = min(max(ev.area_fraction * 20.0, 0.0), 1.0)
     return round(0.45 + 0.35 * depth_score + 0.20 * size_score * ev.strength, 3)
@@ -328,11 +328,15 @@ def build_hypothesis(
             FloorPlaneResult(
                 transform=features.plan_transform,
                 floor_polygon=features.floor_polygon,
-                wall_lines=[],
-                vanishing_point=None,
-                camera_pitch_deg=None,
-                quality="poor",
-                uncertainty_reason="classical horizon-based floor plane",
+                wall_lines=features.wall_lines or [],
+                vanishing_point=features.vanishing_point,
+                camera_pitch_deg=features.camera_pitch_deg,
+                quality=features.floorplane_quality or "poor",
+                uncertainty_reason=(
+                    "classical horizon-based floor plane"
+                    if features.floorplane_quality != "good"
+                    else None
+                ),
             ),
             openings_out,
         )

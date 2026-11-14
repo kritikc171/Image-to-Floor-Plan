@@ -112,10 +112,14 @@ class FloorPlaneEstimator:
 
         wall_lines_plan: list[list[tuple[float, float]]] = []
         if transform is not None and polygon is not None:
-            cx = (ww - 1) / 2.0
+            cx = (width - 1) / 2.0
             for line in edge_candidates:
-                p0 = transform.apply(*_ipm(line[0][0], line[0][1], horizon, cx))
-                p1 = transform.apply(*_ipm(line[1][0], line[1][1], horizon, cx))
+                # Project at ORIGINAL resolution so the points line up with the
+                # transform (which was fit on original-resolution IPM corners).
+                x0o, y0o = line[0][0] * scale_x, line[0][1] * scale_y
+                x1o, y1o = line[1][0] * scale_x, line[1][1] * scale_y
+                p0 = transform.apply(*_ipm(x0o, y0o, horizon_y, cx))
+                p1 = transform.apply(*_ipm(x1o, y1o, horizon_y, cx))
                 wall_lines_plan.append([p0, p1])
         vanishing_point = _vanishing_point(wall_lines_plan)
         pitch = _camera_pitch(horizon, wh)

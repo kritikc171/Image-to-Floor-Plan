@@ -21,7 +21,7 @@ Important conventions
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Optional, Protocol
 
 import numpy as np
 from PIL import Image
@@ -39,6 +39,13 @@ from app.services.normals import NormalsResult, floor_pixel_ratio
 MAX_WORKING_DIMENSION = 256
 MIN_AREA_FRACTION = 0.004
 MIN_FILL_RATIO = 0.05
+
+# Ground-contact gate: a pixel row is treated as floor level only when it sits
+# clearly below the estimated horizon. The margin keeps ill-conditioned,
+# near-horizon projections out while still recovering objects whose base is
+# measurably below the horizon line. The projection itself (project_ground) is
+# the final safety net: anything projecting outside [0, 1] is returned as None.
+FLOOR_LEVEL_MARGIN = 0.05
 
 
 @dataclass(frozen=True)
@@ -86,6 +93,13 @@ class FeatureExtractionResult:
     floor_polygon: list[tuple[float, float]] | None = None  # plan coords
     plan_transform: PlanTransform | None = None
     floor_pixel_ratio: float = 0.0
+    # Floor-plane outputs carried through so the hypothesis stage can build
+    # room geometry from the actual wall-floor intersection cues instead of
+    # discarding them. All optional; absent when the floor plane is weak.
+    wall_lines: list[list[tuple[float, float]]] = field(default_factory=list)  # plan coords
+    vanishing_point: Optional[tuple[float, float]] = None
+    camera_pitch_deg: Optional[float] = None
+    floorplane_quality: Optional[str] = None  # "good" | "poor" | "none"
 
     def to_plan(
         self, x_norm: float, y_norm: float
@@ -124,7 +138,7 @@ class FeatureExtractionResult:
         if self.plan_transform is None:
             return False
         horizon = self.horizon_y / self.image_height
-        return y_norm > horizon + 0.12
+        return y_norm > horizon + FLOOR_LEVEL_MARGIN
 
     def project_ground(
         self, x_norm: float, y_norm: float
@@ -139,7 +153,7 @@ class FeatureExtractionResult:
         if self.plan_transform is None:
             return None
         horizon = self.horizon_y / self.image_height
-        if y_norm <= horizon + 0.12:
+        if y_norm <= horizon + FLOOR_LEVEL_MARGIN:
             return None
         y_px = y_norm * self.image_height
         x_px = x_norm * self.image_width
@@ -223,7 +237,7 @@ class ClassicalFeatureExtractor:
             # floor_level is decided on the bbox bottom edge (y1), the
             # ground-contact row, not the centre. A tall object's centre
             # can sit above the horizon while its base rests on the floor.
-            floor_level = (y1 / wh) > (horizon / wh) + 0.12
+            floor_level = (y1 / wh) > (horizon / wh) + FLOOR_LEVEL_MARGIN
             color = dominant_color(working, comp)
 
             counter += 1

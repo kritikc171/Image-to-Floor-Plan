@@ -16,9 +16,12 @@ from __future__ import annotations
 import io
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from app.services.features import (
+    ClassicalFeatureExtractor,
+    FLOOR_LEVEL_MARGIN,
     PlanTransform,
     VisualEvidence,
     FeatureExtractionResult,
@@ -58,7 +61,7 @@ def _floor_evidence(oid, label, bbox, strength=0.8):
         color=(30, 30, 30),
         area_fraction=0.05,
         strength=strength,
-        floor_level=y_bottom > (120.0 / 240.0) + 0.12,
+        floor_level=y_bottom > (120.0 / 240.0) + FLOOR_LEVEL_MARGIN,
     )
 
 
@@ -191,3 +194,94 @@ def test_renderer_handles_unplaced_without_crash():
     hypothesis = build_hypothesis(_features(objs), detection_model=None)
     png = render_floorplan(hypothesis, "job_unplaced")
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_project_ground_floor_level_margin():
+    """project_ground rejects points within the floor-level margin above the
+    horizon but accepts points measurably below it (the 0.12 -> 0.05 change)."""
+    feats = FeatureExtractionResult(
+        image_width=320, image_height=240, horizon_y=120.0, objects=[],
+        openings=[], floor_polygon=ROOM, plan_transform=TRANSFORM,
+    )
+    # horizon norm = 0.5; margin gate = 0.55.
+    assert feats.project_ground(0.5, 0.50) is None      # on the horizon
+    assert feats.project_ground(0.5, 0.51) is None      # within margin above horizon
+    out = feats.project_ground(0.5, 0.60)               # measurably below horizon
+    assert out is not None
+    px, py = out
+    assert 0.0 <= px <= 1.0 and 0.0 <= py <= 1.0
+
+
+def test_feature_extractor_floor_level_uses_margin():
+    """An object whose base sits between the old (0.12) and new (0.05)
+    floor-level gates is treated as floor level."""
+    from app.services.depth import DepthResult
+    from app.services.normals import NormalsResult
+
+    img = Image.new("RGB", (320, 240), (220, 220, 220))
+    for y in range(100, 140):
+        for x in range(100, 180):
+            img.putpixel((x, y), (30, 30, 30))
+
+    depth_result = DepthResult(
+        depth=np.zeros((240, 320), dtype=np.float32),
+        horizon_y=120.0, width=320, height=240,
+    )
+    normals_result = NormalsResult(
+        normals=np.zeros((240, 320, 3), dtype=np.float32),
+        valid=np.zeros((240, 320), dtype=bool),
+        fov_deg=60.0, fx=1.0, fy=1.0, cx=0.0, cy=0.0,
+    )
+    features = ClassicalFeatureExtractor().extract(img, depth_result, normals_result)
+    floor_objs = [o for o in features.objects if o.floor_level]
+    assert len(floor_objs) >= 1
+    # Rectangle bottom edge is near row 139-141 -> norm ~0.58.
+    # Old gate: 0.5 + 0.12 = 0.62 -> rejected. New gate: 0.55 -> accepted.
+    y_max = floor_objs[0].bbox[3]
+    assert floor_objs[0].floor_level is True
+    assert 0.55 < y_max <= 0.62
+
+
+def test_hypothesis_places_object_just_below_old_margin():
+    """An object below the new floor-level gate gets a real plan position
+    instead of being left unplaced."""
+    objs = [
+        _floor_evidence("object-001", "wide surface", (0.40, 0.45, 0.60, 0.58), strength=0.6),
+    ]
+    hypothesis = build_hypothesis(_features(objs), detection_model=None)
+    assert len(hypothesis.objects) == 1
+    obj = hypothesis.objects[0]
+    # bottom at 0.58 > new gate 0.55 -> projected; old gate 0.62 would reject.
+    assert obj.position is not None
+    assert obj.placement_confidence is not None
+    assert 0.0 <= obj.position.x <= 1.0
+    assert 0.0 <= obj.position.y <= 1.0
+
+
+def test_room_geometry_includes_wall_floor_intersection_lines():
+    """Wall-floor intersection cues from the floor plane become wall segments
+    in room geometry; lines duplicating a polygon edge are not repeated."""
+    transform = PlanTransform(sx=0.5, sy=0.5, ox=0.25, oy=0.25)
+    polygon = [(0.05, 0.10), (0.95, 0.10), (0.95, 0.90), (0.05, 0.90)]
+    wall_lines = [
+        [(0.05, 0.10), (0.95, 0.10)],   # duplicates top polygon edge -> skipped
+        [(0.40, 0.40), (0.40, 0.80)],   # interior wall-floor cue -> added
+        [(0.20, 0.50), (0.20, 0.50)],   # degenerate -> skipped
+    ]
+    features = FeatureExtractionResult(
+        image_width=320, image_height=240, horizon_y=120.0, objects=[],
+        openings=[], floor_polygon=polygon, plan_transform=transform,
+        wall_lines=wall_lines, floorplane_quality="good",
+    )
+    hypothesis = build_hypothesis(features)
+    rg = hypothesis.room_geometry
+    assert rg is not None
+    perimeter_walls = [w for w in rg.walls if w.id.startswith("wall-") and not w.id.startswith("wall-wl-")]
+    cue_walls = [w for w in rg.walls if w.id.startswith("wall-wl-")]
+    assert len(perimeter_walls) == 4, f"expected 4 perimeter walls, got {len(perimeter_walls)}"
+    assert len(cue_walls) == 1, f"expected 1 wall-floor cue wall, got {len(cue_walls)}"
+    assert cue_walls[0].start.x == 0.4 and cue_walls[0].start.y == 0.4
+    assert cue_walls[0].end.x == 0.4 and cue_walls[0].end.y == 0.8
+    assert cue_walls[0].evidence_status.value == "INFERRED"
+    # Perimeter preserved as the boundary.
+    assert len(hypothesis.room_boundary.polygon) == 4

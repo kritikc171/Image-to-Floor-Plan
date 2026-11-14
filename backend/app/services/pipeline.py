@@ -28,6 +28,7 @@ from app.services.depth import (
 from app.services.features import (
     ClassicalFeatureExtractor,
     FeatureExtractor,
+    FLOOR_LEVEL_MARGIN,
     VisualEvidence,
 )
 from app.services.hypothesis import build_hypothesis
@@ -84,7 +85,7 @@ def _detection_to_evidence(
     # Decide floor-level on the bbox bottom edge (y1), the
     # ground-contact row, not the centre. A tall object's centre can
     # sit above the horizon while its base rests on the floor.
-    floor_level = y1 > (horizon_y / height) + 0.12
+    floor_level = y1 > (horizon_y / height) + FLOOR_LEVEL_MARGIN
 
     mask = np.zeros((height, width), dtype=bool)
     x0_px = max(0, min(int(round(x0 * width)), width - 1))
@@ -142,6 +143,10 @@ def run_pipeline(
             features,
             floor_polygon=floorplane.floor_polygon,
             plan_transform=floorplane.transform,
+            wall_lines=floorplane.wall_lines or [],
+            vanishing_point=floorplane.vanishing_point,
+            camera_pitch_deg=floorplane.camera_pitch_deg,
+            floorplane_quality=floorplane.quality,
         )
 
     # 4. Object detection (pretrained COCO detector -> OBSERVED evidence).

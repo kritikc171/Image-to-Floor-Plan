@@ -97,6 +97,37 @@ def build_room_geometry(
             "Perimeter is the projected visible floor region; walls behind "
             "the camera or fully occluded are absent and not fabricated."
         )
+
+    # Add wall-floor intersection candidates as additional wall segments.
+    # These are actual observed wall/floor edges (e.g. an interior wall
+    # meeting the floor) rather than the floor-region boundary, so they can
+    # extend the perimeter beyond the polygon edges where the evidence
+    # supports it. Any wall line that duplicates a polygon edge is skipped.
+    if polygon and floorplane.wall_lines:
+        edges = _polygon_edges(polygon)
+        for index, line in enumerate(floorplane.wall_lines):
+            if len(line) != 2:
+                continue
+            a, b = line[0], line[1]
+            length, _ = _segment(a, b)
+            if length < 1e-4:
+                continue
+            if _line_duplicates_edge(a, b, edges):
+                continue
+            walls.append(
+                WallSegment(
+                    id=f"wall-wl-{index:03d}",
+                    start=PlanPoint(x=round(a[0], 4), y=round(a[1], 4)),
+                    end=PlanPoint(x=round(b[0], 4), y=round(b[1], 4)),
+                    thickness=default_thickness,
+                    wall_type="uncertain",
+                    evidence_status=EvidenceStatus.INFERRED,
+                    uncertainty_reason=(
+                        "Wall-floor intersection cue; approximate wall "
+                        "segment, not a verified full wall."
+                    ),
+                )
+            )
     else:
         uncertainty_reason = (
             "No reliable floor plane could be estimated; room geometry "
@@ -196,3 +227,33 @@ def _point_segment_dist(
     t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
     fx, fy = ax + t * dx, ay + t * dy
     return ((px - fx) ** 2 + (py - fy) ** 2) ** 0.5
+
+
+def _polygon_edges(polygon: list[tuple[float, float]]) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    n = len(polygon)
+    if n < 2:
+        return []
+    return [(polygon[i], polygon[(i + 1) % n]) for i in range(n)]
+
+
+def _line_duplicates_edge(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    edges: list[tuple[tuple[float, float], tuple[float, float]]],
+    tol: float = 0.02,
+) -> bool:
+    """True when wall line ``ab`` matches a polygon edge within tolerance."""
+    for (e0, e1) in edges:
+        same_order = (
+            _dist(a, e0) <= tol and _dist(b, e1) <= tol
+        )
+        swapped = (
+            _dist(a, e1) <= tol and _dist(b, e0) <= tol
+        )
+        if same_order or swapped:
+            return True
+    return False
+
+
+def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
