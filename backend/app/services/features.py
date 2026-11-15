@@ -487,6 +487,12 @@ class ClassicalFeatureExtractor:
             bh = y1 - y0 + 1
             if bw <= 0 or bh <= 0:
                 continue
+            spans_opposite_borders = (
+                (x0 <= 1 and x1 >= ww - 2)
+                or (y0 <= 1 and y1 >= wh - 2)
+            )
+            if spans_opposite_borders:
+                continue
             aspect = bw / bh
             if aspect < 0.2 or aspect > 5.0:
                 continue

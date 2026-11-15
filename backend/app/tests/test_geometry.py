@@ -29,7 +29,14 @@ from app.services.features import (
     FeatureExtractionResult,
 )
 from app.services.hypothesis import build_hypothesis
-from app.services.layout import rect, rect_inside_poly, fit_footprint, resolve_overlap
+from app.services.layout import (
+    fit_footprint,
+    oriented_dimensions,
+    rect,
+    rect_inside_poly,
+    rect_overlap,
+    resolve_overlap,
+)
 from app.services.renderer import (
     FURNITURE_FILLS,
     STATUS_COLORS,
@@ -37,6 +44,7 @@ from app.services.renderer import (
     _draw_numbered_markers,
     _plan_region,
     _rounded_rect_points,
+    _sofa_seat_count,
     plan_to_px,
     render_floorplan,
 )
@@ -224,6 +232,16 @@ def test_furniture_uses_material_color_and_keeps_evidence_status_visible():
         assert STATUS_COLORS[EvidenceStatus.OBSERVED] in colors
 
 
+@pytest.mark.parametrize(
+    ("footprint_width", "expected_seats"),
+    [(0.30, 1), (0.50, 2), (0.75, 3)],
+)
+def test_sofa_seat_count_matches_approximate_footprint(
+    footprint_width, expected_seats
+):
+    assert _sofa_seat_count(footprint_width) == expected_seats
+
+
 def test_numbered_marker_is_placed_outside_its_furniture_footprint():
     class MarkerRecorder:
         ellipses = []
@@ -265,6 +283,59 @@ def test_resolve_overlap_separates_without_leaving_room():
     assert rect_inside_poly(cand, ROOM)
     ox, oy = rect_overlap_if_needed(r1, cand)
     assert ox <= 0.005 or oy <= 0.005
+
+
+def test_clustered_furniture_is_repositioned_without_overlapping():
+    labels = ["bed", "couch", "chair", "dining table", "desk", "cabinet", "tv"]
+    objects = [
+        _floor_evidence(
+            f"cluster-{index}",
+            label,
+            (0.46, 0.65, 0.54, 0.80),
+        )
+        for index, label in enumerate(labels)
+    ]
+    features = _features(objects)
+    original = features.to_plan_ground(objects[0].bbox)
+    hypothesis = build_hypothesis(features)
+    placed = [obj for obj in hypothesis.objects if obj.position is not None]
+
+    assert len(placed) == len(objects)
+    assert original is not None
+    assert any(
+        abs(obj.position.x - original[0]) > 0.02
+        or abs(obj.position.y - original[1]) > 0.02
+        for obj in placed
+    )
+    for index, obj in enumerate(placed):
+        footprint = obj.footprint or {}
+        width, depth = oriented_dimensions(
+            footprint["width"],
+            footprint["depth"],
+            obj.orientation or 0.0,
+        )
+        bounds = rect(obj.position.x, obj.position.y, width, depth)
+        assert rect_inside_poly(bounds, ROOM)
+        for other in placed[index + 1:]:
+            other_fp = other.footprint or {}
+            other_w, other_d = oriented_dimensions(
+                other_fp["width"],
+                other_fp["depth"],
+                other.orientation or 0.0,
+            )
+            other_bounds = rect(other.position.x, other.position.y, other_w, other_d)
+            assert rect_overlap(bounds, other_bounds) == (0.0, 0.0)
+            overlap_x = min(bounds[2], other_bounds[2]) - max(bounds[0], other_bounds[0])
+            overlap_y = min(bounds[3], other_bounds[3]) - max(bounds[1], other_bounds[1])
+            assert overlap_x <= -0.0079 or overlap_y <= -0.0079
+
+
+def test_object_is_left_unplaced_when_no_clear_position_exists():
+    room = [(0.01, 0.01), (0.99, 0.01), (0.99, 0.99), (0.01, 0.99)]
+    large = rect(0.5, 0.5, 0.95, 0.95)
+    cx, cy, issue = resolve_overlap(large, [large], room)
+    assert (cx, cy) == pytest.approx((0.5, 0.5))
+    assert issue is not None
 
 
 def rect_overlap_if_needed(a, b):

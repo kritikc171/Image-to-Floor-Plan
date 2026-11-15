@@ -46,7 +46,7 @@ except Exception:  # torch/torchvision not installed
     to_image = None  # type: ignore[assignment]
 
 DEFAULT_CONFIDENCE_THRESHOLD = 0.35
-MAX_DETECTIONS = 20
+MAX_DETECTIONS = 100
 MODEL_NAME = "ssdlite320_mobilenet_v3_large"
 DATASET = "COCO-2017"
 
@@ -178,7 +178,7 @@ class TorchVisionDetector:
         categories = self._categories or []
 
         detections: list[Detection] = []
-        for index in range(min(len(boxes), self.max_detections)):
+        for index in range(len(boxes)):
             confidence = float(scores[index])
             if confidence < self.confidence_threshold:
                 continue
@@ -206,7 +206,7 @@ class TorchVisionDetector:
                 )
             )
 
-        detections = self._deduplicate(detections)
+        detections = self._deduplicate(detections)[:self.max_detections]
         return DetectionResult(detections, self.model_name, True)
 
 

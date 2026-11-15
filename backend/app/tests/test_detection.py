@@ -68,6 +68,40 @@ def test_detector_suppresses_near_identical_cross_class_boxes():
     assert [item.id for item in result] == ["det-000", "det-002"]
 
 
+def test_detector_processes_more_than_twenty_model_candidates(monkeypatch):
+    import torch
+    import app.services.detection as detection_module
+
+    boxes = [
+        [index * 20, 20, index * 20 + 10, 30]
+        for index in range(25)
+    ]
+
+    class FakeModel:
+        def __call__(self, _images):
+            return [{
+                "boxes": torch.tensor(boxes, dtype=torch.float32),
+                "labels": torch.ones(25, dtype=torch.int64),
+                "scores": torch.linspace(0.9, 0.7, 25),
+            }]
+
+    monkeypatch.setattr(detection_module, "to_image", lambda image: image)
+    monkeypatch.setattr(
+        detection_module,
+        "to_dtype",
+        lambda image, **_kwargs: image,
+    )
+    detector = TorchVisionDetector()
+    detector._model = FakeModel()
+    detector._categories = ["__background__", "chair"]
+
+    result = detector.detect(Image.new("RGB", (640, 480)))
+
+    assert result.available
+    assert len(result.detections) == 25
+    assert all(item.class_name == "chair" for item in result.detections)
+
+
 def _depth_result() -> DepthResult:
     return DepthResult(
         depth=None,  # type: ignore[arg-type]

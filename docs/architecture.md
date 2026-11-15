@@ -28,8 +28,9 @@ RGB IMAGE
  → normalize_room_plan     final guard rectifies any remaining non-rectangular
                             outline and composes the transform for object points
  → detect_objects          local Torchvision SSDlite-MobileNetV3 detector
- → build_hypothesis        estimate object footprints, fit inside room, note
-                            uncertainty and unresolved overlaps
+ → build_hypothesis        estimate oriented footprints, keep them inside the
+                            room, and search for the nearest clear placement;
+                            leave an object unplaced if no clear position exists
  → render_floorplan        deterministic Pillow 2D schematic PNG
  → validate_output         Pydantic response models
 ```
@@ -64,10 +65,10 @@ or furniture symbols.
 | `app.services.depth` | `DepthEstimator` interface + classical CPU implementation |
 | `app.services.floorplane` | visible-floor segmentation and projective plan normalization |
 | `app.services.normals` | depth → normals with documented camera convention |
-| `app.services.features` | deterministic visual evidence extraction |
+| `app.services.features` | deterministic visual evidence extraction; rejects regions spanning opposite image borders to avoid treating photo-wide background as furniture |
 | `app.services.detection` | local pretrained Torchvision object detection |
 | `app.services.hypothesis` | deterministic object placement and uncertainty construction |
-| `app.services.layout` | footprint fitting, room containment, and overlap checks |
+| `app.services.layout` | footprint fitting, rotated bounds, room containment, and nearest-clear placement |
 | `app.services.room_geometry` | wall perimeter and uncertain opening attachment |
 | `app.services.renderer` | deterministic floor-plan PNG rendering |
 | `app.api` | FastAPI routes, job lifecycle, artifact serving |

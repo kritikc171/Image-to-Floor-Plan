@@ -30,11 +30,17 @@ verified architectural drawing.** Read this before relying on any output.
   pretrained COCO detector when available and explicitly marked shape-based
   furniture candidates otherwise; it does not invoke an LLM reasoning step.
   Detector scores are not calibrated probabilities, and estimated positions
-  remain uncertain.
+  remain uncertain. The classical extractor discards edge regions spanning
+  opposite image borders because these often represent background or the visible
+  floor, not a single furniture item; smaller non-spanning regions can still be
+  false positives.
 - **Detector class coverage is limited.** The bundled COCO detector can identify
   classes such as beds, couches, chairs, dining tables, and TVs. It does not
   recognize wardrobes, cabinets, doors, or windows as those classes; geometric
-  edge candidates are not confirmation that an opening exists.
+  edge candidates are not confirmation that an opening exists. It processes
+  up to 100 confidence-qualified model candidates per photo, but increasing this
+  limit cannot add classes absent from its training set or guarantee that every
+  visible item will be detected.
 - **Generated views (optional) are synthetic.** If the optional novel-view
   provider is enabled, generated images and anything derived from them are marked
   `GENERATED` and are never treated as real photographs of the room.

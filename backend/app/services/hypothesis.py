@@ -219,48 +219,54 @@ def build_hypothesis(
                     "from the visible floor under a ground-plane assumption."
                 )
 
-        if position is not None and boundary_poly is not None:
-            cx, cy, w, d, fit_issues = layout.fit_footprint(
-                position.x, position.y,
-                footprint["width"], footprint["depth"], boundary_poly,
-            )
-            layout_issues.extend(fit_issues)
-            position = PlanPoint(x=round(cx, 4), y=round(cy, 4))
-            footprint["width"] = round(w, 4)
-            footprint["depth"] = round(d, 4)
-
-            nx, ny, overlap_issue = layout.resolve_overlap(
-                layout.rect(cx, cy, w, d), placed_rects, boundary_poly
-            )
-            if overlap_issue:
-                layout_issues.append(overlap_issue)
-            if nx != cx or ny != cy:
-                position = PlanPoint(x=round(nx, 4), y=round(ny, 4))
-            placed_rects.append(layout.rect(nx, ny, w, d))
-
         orientation = None
         if position is not None:
             orientation = _orientation_for(class_name, position, objects)
             if orientation is None:
                 orientation = 0.0  # stated down-plan assumption
 
+        if position is not None and boundary_poly is not None:
+            angle = orientation or 0.0
+            width = footprint["width"]
+            depth = footprint["depth"]
+            bounds_w, bounds_d = layout.oriented_dimensions(width, depth, angle)
+            cx, cy, fit_w, fit_d, fit_issues = layout.fit_footprint(
+                position.x, position.y, bounds_w, bounds_d, boundary_poly,
+            )
+            layout_issues.extend(fit_issues)
+            scale = min(fit_w / bounds_w, fit_d / bounds_d)
+            footprint["width"] = round(width * scale, 4)
+            footprint["depth"] = round(depth * scale, 4)
+            bounds_w, bounds_d = layout.oriented_dimensions(
+                footprint["width"], footprint["depth"], angle
+            )
+
+            nx, ny, overlap_issue = layout.resolve_overlap(
+                layout.rect(cx, cy, bounds_w, bounds_d),
+                placed_rects,
+                boundary_poly,
+            )
+            if overlap_issue:
+                layout_issues.append(overlap_issue)
+                position = None
+                reason += (
+                    " No non-overlapping in-room position was available, "
+                    "so the object is listed as unplaced rather than drawn "
+                    "on top of another object."
+                )
+            else:
+                position = PlanPoint(x=round(nx, 4), y=round(ny, 4))
+                placed_rects.append(layout.rect(nx, ny, bounds_w, bounds_d))
+
         footprint_polygon = [
-            PlanPoint(
-                x=round(position.x - footprint["width"] / 2, 4),
-                y=round(position.y - footprint["depth"] / 2, 4),
-            ),
-            PlanPoint(
-                x=round(position.x + footprint["width"] / 2, 4),
-                y=round(position.y - footprint["depth"] / 2, 4),
-            ),
-            PlanPoint(
-                x=round(position.x + footprint["width"] / 2, 4),
-                y=round(position.y + footprint["depth"] / 2, 4),
-            ),
-            PlanPoint(
-                x=round(position.x - footprint["width"] / 2, 4),
-                y=round(position.y + footprint["depth"] / 2, 4),
-            ),
+            PlanPoint(x=round(x, 4), y=round(y, 4))
+            for x, y in layout.oriented_corners(
+                position.x,
+                position.y,
+                footprint["width"],
+                footprint["depth"],
+                orientation or 0.0,
+            )
         ] if position is not None else None
 
         objects.append(

@@ -74,9 +74,6 @@ WINDOW = (60, 75, 100)
 MARKER_R = 11
 MARKER_MIN_DIST = 30
 
-SYM_MIN = 28.0
-SYM_MAX = 200.0
-
 STATUS_COLORS = {
     EvidenceStatus.OBSERVED: (34, 197, 94),
     EvidenceStatus.INFERRED: (245, 158, 11),
@@ -203,8 +200,7 @@ def plan_to_px(x: float, y: float, plan: dict) -> tuple[float, float]:
 
 
 def _sym_px(unit: float, span: float) -> float:
-    px = unit * span
-    return min(max(px, SYM_MIN), SYM_MAX) / 2.0
+    return max(0.0, unit) * span / 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +504,10 @@ def _draw_furniture(
     if "bed" in label:
         _draw_bed(draw, px, py, half_w, half_d, angle, color, fill)
     elif "sofa" in label or "couch" in label:
-        _draw_sofa(draw, px, py, half_w, half_d, angle, color, fill)
+        _draw_sofa(
+            draw, px, py, half_w, half_d, angle, color, fill,
+            _sofa_seat_count(w),
+        )
     elif "chair" in label:
         _draw_chair(draw, px, py, half_w, half_d, angle, color, fill)
     elif "dining table" in label or "table" in label:
@@ -572,7 +571,7 @@ def _draw_bed(draw, px, py, hw, hd, angle, color, fill):
         )
 
 
-def _draw_sofa(draw, px, py, hw, hd, angle, color, fill):
+def _draw_sofa(draw, px, py, hw, hd, angle, color, fill, seat_count):
     pts = _rounded_rect_points(px, py, hw * 2, hd * 2, 12, angle)
     draw.polygon(pts, fill=fill, outline=color, width=3)
     arm_w = min(max(hw * 0.20, 7), hw * 0.38)
@@ -588,7 +587,7 @@ def _draw_sofa(draw, px, py, hw, hd, angle, color, fill):
         hw * 1.45, back_h, 6, angle, color, (176, 157, 134), 2,
     )
     cushion_y = back_h * 0.35
-    cushion_count = 3 if hw >= 48 else 2
+    cushion_count = seat_count
     cushion_gap = 3
     cushion_total_w = max(8, hw * 2 - arm_w * 2 - cushion_gap * (cushion_count + 1))
     cushion_w = cushion_total_w / cushion_count
@@ -610,6 +609,15 @@ def _draw_sofa(draw, px, py, hw, hd, angle, color, fill):
             fill=(186, 168, 145),
             width=1,
         )
+
+
+def _sofa_seat_count(footprint_width: float) -> int:
+    """Estimate visible sofa seats from its normalized plan width."""
+    if footprint_width < 0.38:
+        return 1
+    if footprint_width < 0.68:
+        return 2
+    return 3
 
 
 def _draw_chair(draw, px, py, hw, hd, angle, color, fill):

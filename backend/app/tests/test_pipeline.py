@@ -6,10 +6,11 @@ import io
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from app.services.depth import (
     ClassicalDepthCueEstimator,
+    DepthResult,
     _build_depth,
     _estimate_horizon,
 )
@@ -24,6 +25,7 @@ from app.services.floorplane import FloorPlaneEstimator
 from app.services.hypothesis import build_hypothesis
 from app.services.normals import (
     DepthNormalEstimator,
+    NormalsResult,
     floor_pixel_ratio,
 )
 from app.services.pipeline import run_pipeline
@@ -117,6 +119,35 @@ def test_feature_extraction_finds_synthetic_object():
     assert obj.floor_level is True
     assert 0 <= obj.centroid[0] <= 1
     assert 0 <= obj.centroid[1] <= 1
+
+
+def test_feature_extraction_ignores_regions_spanning_opposite_image_borders():
+    image = Image.new("RGB", (320, 240), (180, 180, 180))
+    draw = ImageDraw.Draw(image)
+    for y in range(0, 240, 24):
+        for x in range(0, 320, 24):
+            if (x // 24 + y // 24) % 2:
+                draw.rectangle((x, y, x + 23, y + 23), fill=(30, 30, 30))
+
+    depth = DepthResult(
+        depth=np.zeros((240, 320), dtype=np.float32),
+        horizon_y=120.0,
+        width=320,
+        height=240,
+    )
+    normals = NormalsResult(
+        normals=np.zeros((240, 320, 3), dtype=np.float32),
+        valid=np.zeros((240, 320), dtype=bool),
+        fov_deg=60.0,
+        fx=1.0,
+        fy=1.0,
+        cx=0.0,
+        cy=0.0,
+    )
+
+    features = ClassicalFeatureExtractor().extract(image, depth, normals)
+
+    assert features.objects == []
 
 
 def test_hypothesis_marks_floor_objects_inferred():

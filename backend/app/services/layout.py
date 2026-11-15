@@ -23,10 +23,33 @@ def rect(cx, cy, w, d):
     return (cx - w / 2, cy - d / 2, cx + w / 2, cy + d / 2)
 
 
+def oriented_dimensions(w, d, angle):
+    """Return the axis-aligned bounds of a rotated rectangular footprint."""
+    cosine, sine = abs(math.cos(angle)), abs(math.sin(angle))
+    return w * cosine + d * sine, w * sine + d * cosine
+
+
+def oriented_corners(cx, cy, w, d, angle):
+    """Return the corners of a rotated footprint in plan coordinates."""
+    cosine, sine = math.cos(angle), math.sin(angle)
+    return [
+        (
+            cx + x * cosine - y * sine,
+            cy + x * sine + y * cosine,
+        )
+        for x, y in (
+            (-w / 2, -d / 2),
+            (w / 2, -d / 2),
+            (w / 2, d / 2),
+            (-w / 2, d / 2),
+        )
+    ]
+
+
 def rect_overlap(a, b):
     ox = min(a[2], b[2]) - max(a[0], b[0])
     oy = min(a[3], b[3]) - max(a[1], b[1])
-    return (ox, oy) if ox > 0.005 and oy > 0.005 else (0.0, 0.0)
+    return (ox, oy) if ox > 1e-9 and oy > 1e-9 else (0.0, 0.0)
 
 
 def rect_inside_poly(r, poly):
@@ -81,49 +104,57 @@ def fit_footprint(cx, cy, w, d, poly):
 
 
 def resolve_overlap(r_new, placed, poly):
-    """Make the smallest in-room correction that clears existing footprints."""
+    """Find the nearest in-room position clear of all placed footprints."""
     cx = (r_new[0] + r_new[2]) / 2
     cy = (r_new[1] + r_new[3]) / 2
     width = r_new[2] - r_new[0]
     depth = r_new[3] - r_new[1]
-    candidates = []
-    clearance = 0.005
+    minx, miny, maxx, maxy = poly_aabb(poly)
+    step = 0.01
+    clearance = 0.008
+    max_ring = math.ceil(max(maxx - minx, maxy - miny) / step)
 
-    for existing in placed:
-        ox, oy = rect_overlap(r_new, existing)
-        if ox <= 0 and oy <= 0:
-            continue
-        if ox > 0:
-            candidates.extend(
-                ((cx + ox + clearance, cy), (cx - ox - clearance, cy))
-            )
-        if oy > 0:
-            candidates.extend(
-                ((cx, cy + oy + clearance), (cx, cy - oy - clearance))
-            )
-
-    candidates.sort(
-        key=lambda point: (
-            (point[0] - cx) ** 2 + (point[1] - cy) ** 2,
-            point[1],
-            point[0],
-        )
-    )
-    for nx, ny in candidates:
+    def is_available(nx, ny):
         candidate = rect(nx, ny, width, depth)
         if not rect_inside_poly(candidate, poly):
-            continue
-        if any(
-            rect_overlap(candidate, existing)[0] > 0
-            and rect_overlap(candidate, existing)[1] > 0
-            for existing in placed
-        ):
-            continue
-        return nx, ny, None
+            return False
+        for existing in placed:
+            gap_x = min(candidate[2], existing[2]) - max(
+                candidate[0], existing[0]
+            )
+            gap_y = min(candidate[3], existing[3]) - max(
+                candidate[1], existing[1]
+            )
+            if gap_x > -clearance and gap_y > -clearance:
+                return False
+        return True
 
-    if candidates:
-        return cx, cy, "overlaps another object; position approximate"
-    return cx, cy, None
+    if is_available(cx, cy):
+        return cx, cy, None
+
+    # Search outward in deterministic square rings. Sorting each ring by
+    # distance preserves the observed position as much as possible.
+    for ring in range(1, max_ring + 1):
+        offsets = set()
+        for index in range(-ring, ring + 1):
+            offsets.add((index, -ring))
+            offsets.add((index, ring))
+            offsets.add((-ring, index))
+            offsets.add((ring, index))
+        ordered_offsets = sorted(
+            offsets,
+            key=lambda offset: (
+                offset[0] * offset[0] + offset[1] * offset[1],
+                offset[1],
+                offset[0],
+            ),
+        )
+        for dx, dy in ordered_offsets:
+            nx, ny = cx + dx * step, cy + dy * step
+            if is_available(nx, ny):
+                return nx, ny, None
+
+    return cx, cy, "no non-overlapping in-room position; object left unplaced"
 
 
 def rect_vs_walls(r, walls, radius: float = 0.001):
