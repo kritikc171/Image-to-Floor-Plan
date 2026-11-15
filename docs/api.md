@@ -23,7 +23,7 @@ Health check. Never exposes configuration values or secrets.
 Upload exactly one indoor-room photograph and start processing.
 
 **Request**: `multipart/form-data`, field `file`, single image
-(pPNG/JPEG/WebP/GIF/BMP), max 15 MB, max 4096 px per dimension (configurable).
+(PNG/JPEG/WebP/GIF/BMP), max 15 MB, max 4096 px per dimension (configurable).
 
 **Responses**:
 
@@ -39,10 +39,9 @@ Upload exactly one indoor-room photograph and start processing.
 
 - `400` — no file, multiple files, unsupported format, malformed image,
   oversize image.
-- `413` — file exceeds byte limit.
+- `413` — file exceeds byte limit or image dimensions exceed per-side limit.
 - `415` — unsupported media type.
 - `429` — too many concurrent jobs (configurable).
-- `503` — processing backend unavailable.
 
 ## `GET /api/generations/{job_id}`
 
@@ -63,66 +62,138 @@ Poll job status and result metadata.
 
 `status` is one of `queued`, `processing`, `completed`, `failed`.
 `error` is `null` or `{"code": "...", "message": "..."}` (safe, no internals).
+Processing is asynchronous; poll this endpoint until status reaches a terminal
+state.
 
 ### Result schema (v1)
+
+The completed result is a `GenerationResult` object nested under `result`:
 
 ```jsonc
 {
   "schema_version": "1.0",
   "job_id": "job_01HF...",
-  "created_at": "...",
-  "input": {"width_px": 1920, "height_px": 1080, "format": "png"},
-  "room_boundary": {
-    "polygon": [{"x": 0.1, "y": 0.2}, ...],   // normalized 0–1 plan space
-    "evidence_status": "INFERRED",
-    "uncertainty_reason": "boundary estimated from dominant edges"
-  },
-  "objects": [
-    {
-      "id": "object-001",
-      "type": "furniture",
-      "label": "bed",
-      "position": {"x": 0.4, "y": 0.6},
-      "orientation": 0.0,
-      "dimensions": null,
-      "evidence_status": "UNCERTAIN",
-      "confidence": null,
-      "evidence_source": ["classical-cv"],
-      "uncertainty_reason": "Insufficient evidence to estimate floor position"
+  "created_at": "2026-10-13T15:39:25Z",
+  "input": {"width_px": 1920, "height_px": 1080, "format": "PNG"},
+  "hypothesis": {
+    "schema_version": "1.0",
+    "room_boundary": {
+      "polygon": [{"x": 0.1, "y": 0.2}, ...],
+      "evidence_status": "INFERRED",
+      "uncertainty_reason": "boundary estimated from visible floor region"
+    },
+    "room_geometry": {
+      "perimeter": [{"x": 0.1, "y": 0.2}, ...],
+      "corners": [{"x": 0.1, "y": 0.2}, ...],
+      "walls": [...],
+      "doors": [],
+      "windows": [],
+      "evidence_status": "INFERRED",
+      "uncertainty_reason": "...",
+      "rectangular_assumption": true
+    },
+    "geometry_diagnostics": {
+      "geometry_source": "floorplane-estimator",
+      "source_ground_corners": [[...], ...],
+      "homography_applied": true,
+      "correction_method": "projective homography",
+      "fallback_reason": null,
+      "corrected_room_corners": [...],
+      "renderer_perimeter": [...],
+      "renderer_wall_segments": [...]
+    },
+    "objects": [
+      {
+        "id": "object-001",
+        "type": "furniture",
+        "label": "dining table",
+        "image_bbox": {"x_min": 0.2, "y_min": 0.6, "x_max": 0.5, "y_max": 0.8},
+        "position": {"x": 0.4, "y": 0.6},
+        "orientation": 0.0,
+        "dimensions": null,
+        "dimensions_confidence": null,
+        "footprint": {"width": 0.34, "depth": 0.34, "approximate": true, "basis": "..."},
+        "footprint_polygon": [...],
+        "footprint_confidence": 0.62,
+        "ground_contact": {"x": 0.4, "y": 0.8},
+        "ground_confidence": 0.75,
+        "confidence": 0.62,
+        "placement_confidence": 0.62,
+        "evidence_status": "OBSERVED",
+        "evidence_source": ["torchvision-ssdlite-coco"],
+        "uncertainty_reason": "Class 'dining table' detected in the photograph...",
+        "layout_issues": null
+      }
+    ],
+    "openings": [
+      {
+        "id": "opening-001",
+        "kind": "opening",
+        "side": null,
+        "position": {"x": 0.05, "y": 0.5},
+        "width": null,
+        "swing": null,
+        "swing_degrees": null,
+        "wall_id": null,
+        "evidence_status": "UNCERTAIN",
+        "uncertainty_reason": "Border-adjacent edge candidate; not confirmed as a door or window."
+      }
+    ],
+    "uncertainty": {
+      "overall": "high",
+      "assumptions": [
+        "Single RGB photograph without camera intrinsics",
+        "Camera optical axis assumed parallel to the floor",
+        "Depth is a unitless relative estimate, not metric depth",
+        "Object labels are generic geometric descriptions",
+        "Heuristic scores are not calibrated probabilities"
+      ],
+      "open_questions": ["Where are the room boundaries?"]
+    },
+    "provenance": {
+      "reasoning_provider": "deterministic-fallback",
+      "depth_method": "classical-relative (horizon + ground-plane cue)",
+      "feature_method": "classical-cv (gradient regions + floor segmentation)",
+      "detection_model": "ssdlite320_mobilenet_v3_large (COCO-2017)",
+      "generated_views_used": 0,
+      "model_name": null
     }
-  ],
-  "openings": [
-    {"id": "opening-001", "kind": "door", "side": "left",
-     "position": {"x": 0.05, "y": 0.5}, "evidence_status": "UNCERTAIN"}
-  ],
-  "uncertainty": {
-    "overall": "high",
-    "assumptions": ["pinhole camera, no metric intrinsics available", "..."],
-    "open_questions": ["Is there a window on the north wall?"]
   },
-  "provenance": {"reasoning_provider": "groq|deterministic-fallback",
-                 "depth_method": "classical-relative", "generated_views_used": 0},
   "floorplan_image_url": "/api/generations/{job_id}/floorplan"
 }
 ```
 
 ### Evidence statuses
 
-- `OBSERVED` — directly supported by the original photograph.
-- `INFERRED` — estimated from evidence and stated assumptions.
-- `GENERATED` — derived from an AI-generated candidate view (only when the optional
-  provider is enabled).
-- `UNCERTAIN` — insufficient or conflicting evidence.
+- `OBSERVED` — directly supported by the photograph (a pretrained detector hit).
+- `INFERRED` — estimated from visible evidence under stated assumptions.
+- `GENERATED` — derived from an AI-generated candidate view. **Not used by the
+  current pipeline; `generated_views_used` is always `0`.**
+- `UNCERTAIN` — not enough evidence; position or dimensions unknown.
 
-Precedence: OBSERVED > INFERRED > GENERATED > UNCERTAIN. Observed evidence is
-never overwritten by generated hypotheses.
+Precedence: OBSERVED > INFERRED > GENERATED > UNCERTAIN. Detection and spatial
+placement are different concepts: an object whose class is `OBSERVED` may still
+have a floor position that is `INFERRED` or `UNCERTAIN`.
 
 ## `GET /api/generations/{job_id}/floorplan`
 
 Returns the rendered floor plan as **PNG** (`image/png`).
 
-- `200` — PNG bytes.
-- `404` — unknown job or floor plan not yet rendered.
+- `200` — PNG bytes (1400 × 1000).
+- `404` — unknown job.
+- `409` — job exists but the floor plan is not ready yet (not completed).
+
+## `POST /api/generations/{job_id}/ask`
+
+Ask a simple question about a completed floor plan. This is a **deterministic
+text matcher**, not an LLM — it answers counts, positions, confidence,
+observed/uncertain objects, and limitations from the hypothesis JSON.
+
+**Request**: `{"question": "..."}` (max 500 characters).
+
+## `GET /api/health`
+
+Health check. Returns `{"status": "ok", "version": "0.1.0"}`.
 
 ## Notes
 
