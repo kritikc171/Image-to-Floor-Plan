@@ -257,6 +257,18 @@ Each stage below describes its purpose, input, methodology, output, and limitati
   - `POST /api/generations/{job_id}/ask` — simple Q&A about the result
   - `GET /api/health` — health check
 
+## Visuals
+
+### Input vs. generated output
+
+The images below are genuine outputs from the current implementation, produced by running the backend pipeline on a real indoor-room photograph.
+
+![Sample input photograph uploaded to the system](docs/images/sample-input-upload.png)
+
+![Generated schematic floor plan from the input photograph](docs/images/sample-generated-floorplan.png)
+
+The input photograph shows a living/dining area with a dining table and chairs. The generated floor plan is a rectangular approximation showing the estimated table and chair positions, with evidence-status markers (all `Observed` in this example because the objects were detected by the COCO detector). The plan is explicitly labeled "RECTANGULAR APPROXIMATION" and "not to scale."
+
 ## Quick start
 
 Run the backend and frontend in **two separate PowerShell terminals**. In each
