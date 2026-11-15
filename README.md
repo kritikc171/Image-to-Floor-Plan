@@ -271,10 +271,10 @@ The input photograph shows a living/dining area with a dining table and chairs. 
 
 ## Quick start
 
-Run the backend and frontend in **two separate PowerShell terminals**. In each
-terminal, start from the project root.
+Run the backend and frontend in **two separate PowerShell terminals**. In each terminal, start from the project root.
 
 ### Prerequisites
+
 - Python 3.13 (verified with 3.13.12; required by the pinned CV/AI stack)
 - Node.js 24 and npm 12 (verified)
 - Git
@@ -332,20 +332,28 @@ npm test
 │       ├── services/    CV stages (validation, depth, detection, floor plane, layout, renderer)
 │       └── main.py      FastAPI application factory
 ├── artifacts/       local, temporary processing artifacts (git-ignored)
-└── docs/            architecture, API, limitations
+├── docs/            architecture, API, limitations, images
+│   ├── architecture.md
+│   ├── api.md
+│   ├── limitations.md
+│   └── images/
+│       ├── sample-input-upload.png
+│       └── sample-generated-floorplan.png
+└── README.md
 ```
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — pipeline, modules, data flow
+- [Architecture](docs/architecture.md) — pipeline, modules, data flow, coordinate conventions, job model
 - [API reference](docs/api.md) — endpoints, schemas, status model, errors
 - [Limitations](docs/limitations.md) — what the system cannot guarantee
 
 ## Configuration
 
-Backend settings live in `backend/.env` (see `backend/.env.example`). The baseline
-pipeline works **without any API key**: the Groq reasoning step is optional and a
-deterministic, evidence-based fallback is used when no key is configured. Optional
-novel-view generation is disabled by default.
+Backend settings live in `backend/.env` (see `backend/.env.example`). The baseline pipeline works **without any API key**: optional Groq reasoning and novel-view generation are not invoked by `run_pipeline`, and a deterministic evidence-based fallback is always used. Optional novel-view generation is disabled by default.
 
 No credentials are ever exposed to the frontend bundle.
+
+## License
+
+MIT License — see [LICENSE](LICENSE).
