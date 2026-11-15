@@ -22,9 +22,9 @@ Style
   corners; room interior tinted very lightly.
 - Doors/windows: openings in the wall centreline with a leaf / window
   mark and a swing arc, drawn only when the hypothesis carries them.
-- Furniture: recognisable top-down geometric footprints (bed, sofa,
-  chair, dining table, TV, desk, cabinet, generic), scaled from the
-  estimated footprint and rotated by the estimated orientation.
+- Furniture: class-specific top-down silhouettes with restrained material
+  colors and details, scaled from the estimated footprint and rotated by
+  the estimated orientation. Evidence status remains marked independently.
 - Numbered markers are supplementary identifiers next to furniture;
   they never replace a symbol.
 - OBSERVED/INFERRED/UNCERTAIN colour key in the legend, in its own
@@ -89,6 +89,17 @@ STATUS_FILLS = {
     EvidenceStatus.GENERATED: (237, 233, 254),
     EvidenceStatus.UNCERTAIN: (243, 244, 246),
 }
+FURNITURE_FILLS = {
+    "bed": (224, 214, 197),
+    "sofa": (193, 176, 154),
+    "chair": (205, 184, 151),
+    "table": (196, 160, 112),
+    "desk": (190, 156, 112),
+    "cabinet": (183, 145, 101),
+    "tv": (37, 48, 65),
+    "generic": (207, 211, 216),
+}
+LIGHT_DETAIL = (248, 245, 238)
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -422,6 +433,44 @@ def _rotated_rect(cx, cy, w, h, angle):
     ]
 
 
+def _local_to_px(cx, cy, x, y, angle):
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    return (
+        cx + x * cos_a - y * sin_a,
+        cy + x * sin_a + y * cos_a,
+    )
+
+
+def _rounded_rect_points(cx, cy, w, h, radius, angle=0.0, steps=5):
+    """Approximate a rotated rounded rectangle with a closed polygon."""
+    half_w, half_h = w / 2.0, h / 2.0
+    r = min(max(radius, 0.0), half_w, half_h)
+    if r <= 0.0:
+        return _rotated_rect(cx, cy, w, h, angle)
+
+    corners = (
+        (half_w - r, -half_h + r, -90, 0),
+        (half_w - r, half_h - r, 0, 90),
+        (-half_w + r, half_h - r, 90, 180),
+        (-half_w + r, -half_h + r, 180, 270),
+    )
+    points = []
+    for corner_x, corner_y, start, end in corners:
+        for index in range(steps + 1):
+            theta = math.radians(start + (end - start) * index / steps)
+            x = corner_x + r * math.cos(theta)
+            y = corner_y + r * math.sin(theta)
+            points.append(_local_to_px(cx, cy, x, y, angle))
+    return points
+
+
+def _draw_rounded_rect(
+    draw, cx, cy, w, h, radius, angle, color, fill, width=3
+):
+    points = _rounded_rect_points(cx, cy, w, h, radius, angle)
+    draw.polygon(points, fill=fill, outline=color, width=width)
+
+
 def _draw_furniture(
     draw: ImageDraw.ImageDraw,
     obj,
@@ -430,8 +479,23 @@ def _draw_furniture(
     plan: dict,
 ) -> None:
     label = (obj.label or obj.type or "").lower()
-    color = STATUS_COLORS[obj.evidence_status]
-    fill = STATUS_FILLS[obj.evidence_status]
+    color = INK
+    category = "generic"
+    if "bed" in label:
+        category = "bed"
+    elif "sofa" in label or "couch" in label:
+        category = "sofa"
+    elif "chair" in label:
+        category = "chair"
+    elif "dining table" in label or "table" in label:
+        category = "table"
+    elif "desk" in label:
+        category = "desk"
+    elif "wardrobe" in label or "cabinet" in label or "counter" in label:
+        category = "cabinet"
+    elif "tv" in label:
+        category = "tv"
+    fill = FURNITURE_FILLS[category]
 
     fp = obj.footprint or {}
     w = float(fp.get("width", 0.18) or 0.18)
@@ -458,127 +522,197 @@ def _draw_furniture(
     else:
         _draw_generic(draw, px, py, half_w, half_d, angle, color, fill)
 
-
-def _draw_bed(draw, px, py, hw, hd, angle, color, fill):
-    pts = _rotated_rect(px, py, hw * 2, hd * 2, angle)
-    draw.polygon(pts, fill=fill, outline=color, width=3)
-    # Headboard band on the far side along the local -y axis.
-    hb = max(6, hd * 0.3)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    hx = px - sin_a * hb
-    hy = py + cos_a * hb  # local -y in screen coords (y down) -> forward
-    band = [
-        (px - hw * cos_a - hd * sin_a, py - hw * sin_a + hd * cos_a),
-        (hx - hw * cos_a - hd * sin_a, hy - hw * sin_a + hd * cos_a),
-        (hx + hw * cos_a - hd * sin_a, hy + hw * sin_a + hd * cos_a),
-        (px + hw * cos_a - hd * sin_a, py + hw * sin_a + hd * cos_a),
-    ]
-    draw.polygon(band, fill=(225, 229, 236), outline=color, width=2)
-    # Pillow / mattress division.
-    draw.line(
-        (px - sin_a * hd * 0.45, py + cos_a * hd * 0.45,
-         px + sin_a * hd * 0.45, py - cos_a * hd * 0.45),
-        fill=color,
-        width=2,
+    status_x, status_y = _local_to_px(px, py, half_w * 0.72, half_d * 0.68, angle)
+    status_radius = 4
+    draw.ellipse(
+        (
+            status_x - status_radius,
+            status_y - status_radius,
+            status_x + status_radius,
+            status_y + status_radius,
+        ),
+        fill=STATUS_COLORS[obj.evidence_status],
+        outline=PAPER,
+        width=1,
     )
 
 
-def _draw_sofa(draw, px, py, hw, hd, angle, color, fill):
-    pts = _rotated_rect(px, py, hw * 2, hd * 2, angle)
+def _draw_bed(draw, px, py, hw, hd, angle, color, fill):
+    pts = _rounded_rect_points(px, py, hw * 2, hd * 2, 10, angle)
     draw.polygon(pts, fill=fill, outline=color, width=3)
-    bb = max(6, hd * 0.3)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    band = [
-        (px - hw * cos_a - hd * sin_a, py - hw * sin_a + hd * cos_a),
-        (px - hw * cos_a - (hd - bb) * sin_a,
-         py - hw * sin_a + (hd - bb) * cos_a),
-        (px + hw * cos_a - (hd - bb) * sin_a,
-         py + hw * sin_a + (hd - bb) * cos_a),
-        (px + hw * cos_a - hd * sin_a, py + hw * sin_a + hd * cos_a),
-    ]
-    draw.polygon(band, fill=fill, outline=color, width=2)
-    third = hw * 2 / 3.0
-    for k in (1, 2):
-        cx_ = px - hw * cos_a + k * third * cos_a
-        cy_ = py - hw * sin_a + k * third * sin_a
+    headboard_h = max(10, hd * 0.18)
+    _draw_rounded_rect(
+        draw, *_local_to_px(px, py, 0, -hd + headboard_h / 2, angle),
+        hw * 1.86, headboard_h, 4, angle, color, (166, 126, 87), 2,
+    )
+    _draw_rounded_rect(
+        draw, *_local_to_px(px, py, 0, hd * 0.28, angle),
+        hw * 1.72, hd * 1.18, 8, angle, (197, 190, 178), LIGHT_DETAIL, 1,
+    )
+    pillow_w = hw * 0.70
+    pillow_h = max(9, hd * 0.20)
+    for side in (-1, 1):
+        _draw_rounded_rect(
+            draw, *_local_to_px(px, py, side * hw * 0.48, -hd * 0.48, angle),
+            pillow_w, pillow_h, 5, angle, (173, 165, 153), PAPER, 1,
+        )
+    blanket_y = hd * 0.16
+    draw.line(
+        (*_local_to_px(px, py, -hw * 0.86, blanket_y, angle),
+         *_local_to_px(px, py, hw * 0.86, blanket_y, angle)),
+        fill=(180, 168, 151), width=2,
+    )
+    for offset in (-0.52, 0, 0.52):
+        x = hw * offset
         draw.line(
-            (cx_, cy_, cx_ + bb * sin_a, cy_ - bb * cos_a),
-            fill=color,
-            width=2,
+            (*_local_to_px(px, py, x, hd * 0.40, angle),
+             *_local_to_px(px, py, x, hd * 0.82, angle)),
+            fill=(216, 208, 195),
+            width=1,
+        )
+
+
+def _draw_sofa(draw, px, py, hw, hd, angle, color, fill):
+    pts = _rounded_rect_points(px, py, hw * 2, hd * 2, 12, angle)
+    draw.polygon(pts, fill=fill, outline=color, width=3)
+    arm_w = min(max(hw * 0.20, 7), hw * 0.38)
+    back_h = min(max(hd * 0.28, 8), hd * 0.42)
+    for side in (-1, 1):
+        _draw_rounded_rect(
+            draw,
+            *_local_to_px(px, py, side * (hw - arm_w / 2), 0, angle),
+            arm_w, hd * 1.72, 7, angle, color, (164, 143, 119), 2,
+        )
+    _draw_rounded_rect(
+        draw, *_local_to_px(px, py, 0, -hd + back_h / 2, angle),
+        hw * 1.45, back_h, 6, angle, color, (176, 157, 134), 2,
+    )
+    cushion_y = back_h * 0.35
+    cushion_count = 3 if hw >= 48 else 2
+    cushion_gap = 3
+    cushion_total_w = max(8, hw * 2 - arm_w * 2 - cushion_gap * (cushion_count + 1))
+    cushion_w = cushion_total_w / cushion_count
+    for seat in range(cushion_count):
+        cushion_x = (
+            -cushion_total_w / 2
+            + cushion_w / 2
+            + seat * (cushion_w + cushion_gap)
+        )
+        _draw_rounded_rect(
+            draw,
+            *_local_to_px(px, py, cushion_x, cushion_y, angle),
+            cushion_w, hd * 0.60, 7, angle, color, (215, 200, 180), 2,
+        )
+        seam_x = cushion_x + cushion_w * 0.36
+        draw.line(
+            (*_local_to_px(px, py, seam_x, cushion_y - hd * 0.20, angle),
+             *_local_to_px(px, py, seam_x, cushion_y + hd * 0.20, angle)),
+            fill=(186, 168, 145),
+            width=1,
         )
 
 
 def _draw_chair(draw, px, py, hw, hd, angle, color, fill):
-    pts = _rotated_rect(px, py, hw * 2, hd * 2, angle)
-    draw.polygon(pts, fill=fill, outline=color, width=3)
-    bb = max(6, hd * 0.45)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    band = [
-        (px - hw * cos_a - hd * sin_a, py - hw * sin_a + hd * cos_a),
-        (px - hw * cos_a - (hd - bb) * sin_a,
-         py - hw * sin_a + (hd - bb) * cos_a),
-        (px + hw * cos_a - (hd - bb) * sin_a,
-         py + hw * sin_a + (hd - bb) * cos_a),
-        (px + hw * cos_a - hd * sin_a, py + hw * sin_a + hd * cos_a),
-    ]
-    draw.polygon(band, fill=fill, outline=color, width=2)
+    back_h = max(7, hd * 0.62)
+    back_y = -hd * 0.66
+    seat_y = hd * 0.04
+    _draw_rounded_rect(
+        draw, *_local_to_px(px, py, 0, back_y, angle),
+        hw * 1.70, back_h, 7, angle, color, fill, 2,
+    )
+    _draw_rounded_rect(
+        draw, *_local_to_px(px, py, 0, seat_y, angle),
+        hw * 1.62, hd * 0.70, 8, angle, color, (224, 211, 188), 2,
+    )
+    inset_w, inset_h = hw * 1.25, back_h * 0.56
+    _draw_rounded_rect(
+        draw, *_local_to_px(px, py, 0, back_y, angle),
+        inset_w, inset_h, 4, angle,
+        (156, 130, 101), (219, 203, 178), 1,
+    )
+    leg = max(2, min(hw, hd) * 0.05)
+    for x in (-hw * 0.72, hw * 0.72):
+        for y in (-hd * 0.70, hd * 0.70):
+            lx, ly = _local_to_px(px, py, x, y, angle)
+            draw.ellipse(
+                (lx - leg, ly - leg, lx + leg, ly + leg),
+                fill=color,
+            )
 
 
 def _draw_table(draw, px, py, hw, hd, angle, color, fill):
-    pts = _rotated_rect(px, py, hw * 2, hd * 2, angle)
+    pts = _rounded_rect_points(px, py, hw * 2, hd * 2, 8, angle)
     draw.polygon(pts, fill=fill, outline=color, width=3)
-    leg = max(4, min(hw, hd) * 0.22)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    for sx, sy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
-        lx = px + (sx * hw - sy * 0) * cos_a - (sy * hd) * sin_a
-        ly = py + (sx * hw - sy * 0) * sin_a + (sy * hd) * cos_a
-        draw.ellipse(
-            (lx - leg, ly - leg, lx + leg, ly + leg),
-            fill=fill,
-            outline=color,
-            width=2,
+    inset = max(4, min(hw, hd) * 0.10)
+    _draw_rounded_rect(
+        draw, px, py, hw * 2 - inset * 2, hd * 2 - inset * 2,
+        5, angle, (161, 125, 83), fill, 1,
+    )
+    for offset in (-0.35, 0.10, 0.48):
+        draw.line(
+            (*_local_to_px(px, py, -hw * 0.72, hd * offset, angle),
+             *_local_to_px(px, py, hw * 0.72, hd * (offset + 0.08), angle)),
+            fill=(208, 177, 137),
+            width=1,
         )
 
 
 def _draw_desk(draw, px, py, hw, hd, angle, color, fill):
-    pts = _rotated_rect(px, py, hw * 2, hd * 2, angle)
+    pts = _rounded_rect_points(px, py, hw * 2, hd * 2, 7, angle)
     draw.polygon(pts, fill=fill, outline=color, width=3)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    y1 = py + hd * cos_a
-    x1 = px + hd * sin_a
+    _draw_rounded_rect(
+        draw, *_local_to_px(px, py, 0, -hd * 0.45, angle),
+        hw * 0.72, max(8, hd * 0.24), 3, angle, color, (169, 132, 91), 1,
+    )
+    for side in (-1, 1):
+        hx, hy = _local_to_px(px, py, side * hw * 0.16, -hd * 0.45, angle)
+        draw.ellipse((hx - 1.5, hy - 1.5, hx + 1.5, hy + 1.5), fill=LIGHT_DETAIL)
     draw.line(
-        (px - hw * cos_a, py - hw * sin_a, x1 - hw * cos_a, y1 - hw * sin_a),
-        fill=color,
-        width=2,
+        (*_local_to_px(px, py, -hw * 0.42, hd * 0.55, angle),
+         *_local_to_px(px, py, hw * 0.42, hd * 0.55, angle)),
+        fill=(151, 119, 84), width=2,
     )
 
 
 def _draw_cabinet(draw, px, py, hw, hd, angle, color, fill):
-    pts = _rotated_rect(px, py, hw * 2, hd * 2, angle)
+    pts = _rounded_rect_points(px, py, hw * 2, hd * 2, 6, angle)
     draw.polygon(pts, fill=fill, outline=color, width=3)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    draw.line(
-        (px - hd * sin_a, py + hd * cos_a, px + hd * sin_a, py - hd * cos_a),
-        fill=color,
-        width=2,
-    )
+    panel_w = hw * 0.78
+    panel_h = hd * 1.55
+    for side in (-1, 1):
+        _draw_rounded_rect(
+            draw, *_local_to_px(px, py, side * hw * 0.50, 0, angle),
+            panel_w, panel_h, 3, angle, (153, 117, 78), (198, 164, 125), 1,
+        )
+        hx, hy = _local_to_px(px, py, side * hw * 0.10, 0, angle)
+        draw.ellipse((hx - 2, hy - 2, hx + 2, hy + 2), fill=(94, 77, 59))
 
 
 def _draw_tv(draw, px, py, hw, hd, angle, color, fill):
-    thin = max(4, hd * 0.3)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    p0 = (px - hw * cos_a - thin * sin_a, py - hw * sin_a + thin * cos_a)
-    p1 = (px + hw * cos_a - thin * sin_a, py + hw * sin_a + thin * cos_a)
-    p2 = (px + hw * cos_a + thin * sin_a, py + hw * sin_a - thin * cos_a)
-    p3 = (px - hw * cos_a + thin * sin_a, py - hw * sin_a - thin * cos_a)
-    draw.polygon([p0, p1, p2, p3], fill=fill, outline=color, width=3)
-    draw.line((px - thin * sin_a, py + thin * cos_a, px + thin * sin_a, py - thin * cos_a),
-              fill=color, width=2)
+    _draw_rounded_rect(
+        draw, px, py, hw * 2, max(hd * 2, 8), 4, angle, color, fill, 3,
+    )
+    _draw_rounded_rect(
+        draw, px, py, hw * 1.62, max(hd * 1.18, 4), 2, angle,
+        (95, 106, 120), (61, 77, 97), 1,
+    )
+    _draw_rounded_rect(
+        draw, *_local_to_px(px, py, 0, hd * 0.78, angle),
+        max(8, hw * 0.36), max(3, hd * 0.14), 2, angle,
+        color, (89, 98, 109), 1,
+    )
 
 
 def _draw_generic(draw, px, py, hw, hd, angle, color, fill):
-    pts = _rotated_rect(px, py, hw * 2, hd * 2, angle)
+    pts = _rounded_rect_points(px, py, hw * 2, hd * 2, 8, angle)
     draw.polygon(pts, fill=fill, outline=color, width=3)
+    cx, cy = _local_to_px(px, py, 0, 0, angle)
+    radius = max(3, min(hw, hd) * 0.16)
+    draw.ellipse(
+        (cx - radius, cy - radius, cx + radius, cy + radius),
+        outline=color,
+        width=2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -587,15 +721,49 @@ def _draw_generic(draw, px, py, hw, hd, angle, color, fill):
 
 def _draw_numbered_markers(draw, placed, plan):
     """Supplementary numbered markers placed next to furniture."""
-    placed_pts = [(px, py) for _, _, px, py in placed]
     used = []
     inner = (
         plan["inner_x0"], plan["inner_y0"],
         plan["inner_x0"] + plan["inner_w"], plan["inner_y0"] + plan["inner_h"],
     )
+
+    def available(x, y, marker_index):
+        if not (inner[0] <= x <= inner[2] and inner[1] <= y <= inner[3]):
+            return False
+        if any(
+            ((x - ux) ** 2 + (y - uy) ** 2) ** 0.5 < MARKER_MIN_DIST
+            for ux, uy in used
+        ):
+            return False
+        for other_index, other, ox, oy in placed:
+            if other_index == marker_index:
+                continue
+            other_footprint = other.footprint or {}
+            other_radius = max(
+                _sym_px(
+                    float(other_footprint.get("width", 0.18) or 0.18),
+                    plan["inner_w"],
+                ),
+                _sym_px(
+                    float(other_footprint.get("depth", 0.18) or 0.18),
+                    plan["inner_h"],
+                ),
+            )
+            if ((x - ox) ** 2 + (y - oy) ** 2) ** 0.5 < other_radius + MARKER_R + 4:
+                return False
+        return True
+
     for index, _obj, fpx, fpy in placed:
         best = None
-        for ring in range(0, 40):
+        footprint = _obj.footprint or {}
+        half_w = _sym_px(
+            float(footprint.get("width", 0.18) or 0.18), plan["inner_w"]
+        )
+        half_h = _sym_px(
+            float(footprint.get("depth", 0.18) or 0.18), plan["inner_h"]
+        )
+        first_ring = int((max(half_w, half_h) + MARKER_R + 6) / 5.0)
+        for ring in range(first_ring, 40):
             radius = ring * 5.0
             if radius == 0:
                 candidates = [(fpx, fpy)]
@@ -608,17 +776,27 @@ def _draw_numbered_markers(draw, placed, plan):
                         (fpx + radius * math.cos(ang), fpy + radius * math.sin(ang))
                     )
             for mpx, mpy in candidates:
-                if not (inner[0] <= mpx <= inner[2] and inner[1] <= mpy <= inner[3]):
-                    continue
-                if any(
-                    ((mpx - ux) ** 2 + (mpy - uy) ** 2) ** 0.5 < MARKER_MIN_DIST
-                    for ux, uy in used
-                ):
+                if not available(mpx, mpy, index):
                     continue
                 best = (mpx, mpy)
                 break
             if best is not None:
                 break
+        if best is None:
+            for ring in range(first_ring - 1, -1, -1):
+                radius = ring * 5.0
+                steps = max(8, int(radius)) if radius else 1
+                for k in range(steps):
+                    ang = 2 * math.pi * k / steps if radius else 0
+                    candidate = (
+                        fpx + radius * math.cos(ang),
+                        fpy + radius * math.sin(ang),
+                    )
+                    if available(candidate[0], candidate[1], index):
+                        best = candidate
+                        break
+                if best is not None:
+                    break
         if best is None:
             mpx, mpy = fpx, fpy
         else:

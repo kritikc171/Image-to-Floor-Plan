@@ -30,8 +30,18 @@ from app.services.features import (
 )
 from app.services.hypothesis import build_hypothesis
 from app.services.layout import rect, rect_inside_poly, fit_footprint, resolve_overlap
-from app.services.renderer import _plan_region, plan_to_px, render_floorplan
+from app.services.renderer import (
+    FURNITURE_FILLS,
+    STATUS_COLORS,
+    _draw_furniture,
+    _draw_numbered_markers,
+    _plan_region,
+    _rounded_rect_points,
+    plan_to_px,
+    render_floorplan,
+)
 from app.services.footprint import footprint_for, prior_for
+from app.schemas.spatial import EvidenceStatus, SpatialObject
 
 # A simple rectangular room in normalized plan space.
 ROOM = [(0.05, 0.10), (0.95, 0.10), (0.95, 0.90), (0.05, 0.90)]
@@ -143,6 +153,107 @@ def test_renderer_uses_equal_pixel_scale_for_plan_axes():
     x1, _ = plan_to_px(0.1, 0.0, plan)
     _, y1 = plan_to_px(0.0, 0.1, plan)
     assert abs(x1 - x0) == pytest.approx(abs(y1 - y0))
+
+
+def test_rounded_furniture_symbols_have_curved_corners_and_rotation():
+    points = _rounded_rect_points(100, 100, 80, 40, 8)
+    rotated = _rounded_rect_points(100, 100, 80, 40, 8, angle=0.4)
+    assert len(points) > 4
+    assert points[0] == pytest.approx((132, 80))
+    assert all(np.isfinite(value) for point in rotated for value in point)
+    assert rotated != points
+
+
+def test_known_furniture_labels_render_distinct_symbols():
+    labels = ["bed", "sofa", "chair", "table", "desk", "cabinet", "tv", "unknown"]
+    rendered = set()
+    blank = Image.new("RGB", (200, 200), "white").tobytes()
+    for label in labels:
+        image = Image.new("RGB", (200, 200), "white")
+        obj = SpatialObject(
+            id=f"test-{label}",
+            type=label,
+            label=label,
+            footprint={"width": 0.35, "depth": 0.3},
+            orientation=0.35,
+            evidence_status=EvidenceStatus.OBSERVED,
+        )
+        _draw_furniture(
+            ImageDraw.Draw(image),
+            obj,
+            100,
+            100,
+            {"inner_w": 600, "inner_h": 600},
+        )
+        image_bytes = image.tobytes()
+        assert image_bytes != blank
+        rendered.add(image_bytes)
+    assert len(rendered) == len(labels)
+
+
+def test_furniture_uses_material_color_and_keeps_evidence_status_visible():
+    labels = {
+        "bed": "bed",
+        "sofa": "sofa",
+        "chair": "chair",
+        "dining table": "table",
+        "desk": "desk",
+        "cabinet": "cabinet",
+        "tv": "tv",
+        "unclassified": "generic",
+    }
+    for label, material in labels.items():
+        image = Image.new("RGB", (200, 200), "white")
+        obj = SpatialObject(
+            id=f"material-{label}",
+            type=label,
+            label=label,
+            footprint={"width": 0.22, "depth": 0.25},
+            orientation=0.16,
+            evidence_status=EvidenceStatus.OBSERVED,
+        )
+        _draw_furniture(
+            ImageDraw.Draw(image),
+            obj,
+            100,
+            100,
+            {"inner_w": 500, "inner_h": 500},
+        )
+        colors = {color for _, color in image.getcolors(40000) or []}
+        assert FURNITURE_FILLS[material] in colors
+        assert STATUS_COLORS[EvidenceStatus.OBSERVED] in colors
+
+
+def test_numbered_marker_is_placed_outside_its_furniture_footprint():
+    class MarkerRecorder:
+        ellipses = []
+
+        def ellipse(self, bounds, **_kwargs):
+            self.ellipses.append(bounds)
+
+        def text(self, *_args, **_kwargs):
+            pass
+
+    recorder = MarkerRecorder()
+    obj = SpatialObject(
+        id="marker-test",
+        type="sofa",
+        label="sofa",
+        footprint={"width": 0.35, "depth": 0.3},
+        evidence_status=EvidenceStatus.OBSERVED,
+    )
+    center = (450, 450)
+    plan = {
+        "inner_x0": 100,
+        "inner_y0": 100,
+        "inner_w": 700,
+        "inner_h": 700,
+    }
+    _draw_numbered_markers(recorder, [(1, obj, *center)], plan)
+    assert len(recorder.ellipses) == 1
+    marker = recorder.ellipses[0]
+    marker_center = ((marker[0] + marker[2]) / 2, (marker[1] + marker[3]) / 2)
+    assert np.hypot(marker_center[0] - center[0], marker_center[1] - center[1]) > 110
 
 
 def test_resolve_overlap_separates_without_leaving_room():
