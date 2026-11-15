@@ -9,6 +9,42 @@ downloadable schematic PNG.
 > The pipeline distinguishes **observed** evidence from **inferred** and **uncertain**
 > elements, and never presents inferred geometry as verified.
 
+## Recent improvements (Nov 14–15, 2026)
+
+The existing processing pipeline and upload workflow have been improved; the
+project has not been rebuilt or had its API replaced.
+
+- **Rectangular room outline:** when the visible floor provides usable geometry,
+  the backend uses a projective transform to map it to straight-edged plan
+  coordinates. If that geometry is unsuitable, it uses a labeled rectangular
+  approximation when possible. Object positions are transformed along with the
+  room outline so they stay in the same plan coordinate system. The result also
+  includes geometry diagnostics describing the correction and any fallback.
+- **Furniture placement:** object positions are estimated from their image
+  bounding boxes and projected floor-contact points. The layout step accounts
+  for rotated footprints, keeps furniture inside the estimated room, and
+  searches for a nearby clear position when objects would overlap. If there is
+  no clear position, the object is retained in the result as unplaced rather
+  than being drawn over another item.
+- **Furniture symbols:** the renderer draws class-specific top-down symbols
+  rather than using the same plain rectangle for every detected object. Sofa
+  symbols show one, two, or three seats according to the estimated footprint
+  width. This is a rendering heuristic, not verified seat-count recognition.
+- **Detection and false-positive handling:** the Torchvision COCO detector
+  considers confidence-qualified candidates and retains up to 100 after
+  duplicate suppression. The classical edge extractor discards a connected
+  region that spans opposing image borders, since it is likely to represent
+  photo-wide background or floor rather than one piece of furniture.
+- **Regression coverage:** backend tests cover geometry correction, placement,
+  symbol rendering, candidate handling, and the photo-wide-region filter.
+  Run them from `backend` with `python -m pytest app\tests -q`.
+
+These updates improve the schematic but do not make it an exact floor plan.
+Positions, footprints, and room proportions remain estimates from one image.
+The COCO model can detect only classes it was trained on; it may miss furniture
+or misclassify it, and raising the candidate limit does not add new classes.
+See [Limitations](docs/limitations.md) for details.
+
 ## Quick start
 
 Run the backend and frontend in **two separate PowerShell terminals**. In each
