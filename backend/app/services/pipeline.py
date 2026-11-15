@@ -30,6 +30,7 @@ from app.services.features import (
     FeatureExtractor,
     FLOOR_LEVEL_MARGIN,
     VisualEvidence,
+    normalize_floor_plan_geometry,
 )
 from app.services.hypothesis import build_hypothesis
 from app.services.image_ops import dominant_color
@@ -147,7 +148,12 @@ def run_pipeline(
             vanishing_point=floorplane.vanishing_point,
             camera_pitch_deg=floorplane.camera_pitch_deg,
             floorplane_quality=floorplane.quality,
+            source_ground_corners=floorplane.source_ground_corners or [],
+            geometry_correction_method=floorplane.geometry_correction_method,
+            geometry_fallback_reason=floorplane.geometry_fallback_reason,
+            geometry_source="floorplane-estimator",
         )
+    features = normalize_floor_plan_geometry(features)
 
     # 4. Object detection (pretrained COCO detector -> OBSERVED evidence).
     detection_result = deps.detection.detect(image.image)

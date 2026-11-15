@@ -15,11 +15,26 @@ verified architectural drawing.** Read this before relying on any output.
 - **Depth is relative.** The default depth estimator uses classical image cues
   (horizon/gradient geometry). It is a unitless relative estimate, not metric
   depth, and is used only for coarse placement.
+- **Rectangular geometry is an approximation.** When a usable visible-floor
+  quadrilateral is available, a homography maps it to straight-edged plan
+  coordinates while preserving its estimated aspect ratio. This improves the
+  schematic and keeps object projections in the same coordinate system, but
+  does not verify that the real room is rectangular or recover unseen corners.
+  If homography is rejected but the ground-plane bounds remain usable, the
+  boundary and object coordinates share an axis-aligned rectangular
+  approximation with a bounded fallback aspect ratio. This can distort their
+  relative scale; if the bounds are degenerate, room geometry is unavailable.
 - **Normals are derived.** Surface normals are computed from the relative depth map
   under an assumed pinhole camera model. They are estimates, not ground truth.
-- **Object labels are probabilistic.** Labels come from deterministic shape/color
-  heuristics and, when configured, an LLM reasoning over that evidence. They carry
-  an `INFERRED` or `UNCERTAIN` status and are not calibrated probabilities.
+- **Object labels are limited and uncertain.** The current pipeline uses the
+  pretrained COCO detector when available and explicitly marked shape-based
+  furniture candidates otherwise; it does not invoke an LLM reasoning step.
+  Detector scores are not calibrated probabilities, and estimated positions
+  remain uncertain.
+- **Detector class coverage is limited.** The bundled COCO detector can identify
+  classes such as beds, couches, chairs, dining tables, and TVs. It does not
+  recognize wardrobes, cabinets, doors, or windows as those classes; geometric
+  edge candidates are not confirmation that an opening exists.
 - **Generated views (optional) are synthetic.** If the optional novel-view
   provider is enabled, generated images and anything derived from them are marked
   `GENERATED` and are never treated as real photographs of the room.
@@ -29,8 +44,8 @@ verified architectural drawing.** Read this before relying on any output.
 - One RGB image per request; size and pixel limits enforced server-side.
 - In-memory job state: no restart persistence, no multi-worker deployment.
 - Artifacts are local, temporary, and deleted after the configured TTL.
-- Groq reasoning is optional; without a key the system uses the deterministic
-  fallback and says so in `provenance.reasoning_provider`.
+- Groq configuration is optional, but the current `run_pipeline` does not invoke
+  Groq; it reports the deterministic fallback as the reasoning provider.
 - The optional novel-view provider is disabled by default and capped at 4
   candidate views per request.
 

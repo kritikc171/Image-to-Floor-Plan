@@ -17,19 +17,25 @@ Coordinate spaces (documented in app.schemas.spatial)
 4. PlanPoint       — normalized plan coords in [0, 1], origin top-left.
 5. CanvasPixel     — renderer output pixels.
 
-Stage 3 → 4 is an explicit affine normalization; nothing in the renderer
-ever consumes image or ground coordinates directly.
+Stage 3 → 4 uses a projective transform when the floor quadrilateral is
+usable, with a proportion-preserving rectangular fallback otherwise. Nothing
+in the renderer consumes image or ground coordinates directly.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from PIL import Image
 
 from app.services.depth import DepthResult
-from app.services.features import PlanTransform
+from app.services.features import (
+    PlanTransform,
+    approximate_ground_quad,
+    rectify_ground_quad,
+)
 from app.services.image_ops import sobel_components, to_gray
 from app.services.normals import NormalsResult
 
@@ -62,6 +68,10 @@ class FloorPlaneResult:
     camera_pitch_deg: Optional[float]
     quality: str  # "good" | "poor" | "none"
     uncertainty_reason: Optional[str]
+    source_ground_corners: Optional[list[tuple[float, float]]] = None
+    geometry_correction_method: str = "unknown"
+    geometry_fallback_reason: Optional[str] = None
+    geometry_source: str = "floorplane-estimator"
 
 
 class FloorPlaneEstimator:
@@ -99,6 +109,10 @@ class FloorPlaneEstimator:
                     "No reliable floor region could be segmented "
                     "(depth/normals/horizon cues all weak)."
                 ),
+                geometry_correction_method="unavailable",
+                geometry_fallback_reason=(
+                    "No floor region was available for geometry correction."
+                ),
             )
 
         # Wall-floor intersection: rows where floor gives way to wall,
@@ -120,7 +134,8 @@ class FloorPlaneEstimator:
                 x1o, y1o = line[1][0] * scale_x, line[1][1] * scale_y
                 p0 = transform.apply(*_ipm(x0o, y0o, horizon_y, cx))
                 p1 = transform.apply(*_ipm(x1o, y1o, horizon_y, cx))
-                wall_lines_plan.append([p0, p1])
+                if all(np.isfinite(value) for point in (p0, p1) for value in point):
+                    wall_lines_plan.append([p0, p1])
         vanishing_point = _vanishing_point(wall_lines_plan)
         pitch = _camera_pitch(horizon, wh)
 
@@ -140,6 +155,11 @@ class FloorPlaneEstimator:
                 if quality == "good"
                 else "Floor plane estimated from weak cues; treat as approximate."
             ),
+            source_ground_corners=ground_info.get("source_ground_corners"),
+            geometry_correction_method=ground_info.get(
+                "correction_method", "unknown"
+            ),
+            geometry_fallback_reason=ground_info.get("fallback_reason"),
         )
 
 
@@ -342,25 +362,31 @@ def _floor_polygon_and_transform(
         ipm(left_x, near_y),         # near-left
     ]
 
-    gxs = [c[0] for c in corners]
-    gys = [c[1] for c in corners]
-    min_x, max_x = min(gxs), max(gxs)
-    min_y, max_y = min(gys), max(gys)
-    span_x = max_x - min_x if max_x > min_x else 1.0
-    span_y = max_y - min_y if max_y > min_y else 1.0
+    rectified = rectify_ground_quad(corners)
+    if rectified is not None:
+        transform, polygon = rectified
+        return polygon, transform, {
+            "source_ground_corners": corners,
+            "correction_method": "projective homography",
+            "fallback_reason": None,
+        }
 
-    if span_x <= 0 or span_y <= 0:
-        return None, None, {}
-
-    transform = PlanTransform(
-        sx=0.9 / span_x,
-        sy=0.9 / span_y,
-        ox=0.05 - min_x * (0.9 / span_x),
-        oy=0.05 - min_y * (0.9 / span_y),
-    )
-
-    polygon = [transform.apply(*c) for c in corners]
-    return polygon, transform, {}
+    approximation = approximate_ground_quad(corners)
+    if approximation is None:
+        return None, None, {
+            "source_ground_corners": corners,
+            "correction_method": "unavailable",
+            "fallback_reason": "The ground-plane corner bounds are degenerate.",
+        }
+    transform, polygon = approximation
+    return polygon, transform, {
+        "source_ground_corners": corners,
+        "correction_method": "axis-aligned rectangular approximation",
+        "fallback_reason": (
+            "The floor quadrilateral was degenerate or non-convex; "
+            "used its ground-plane bounds as a rectangular approximation."
+        ),
+    }
 
 
 def _vanishing_point(

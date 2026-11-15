@@ -68,9 +68,6 @@ def build_room_geometry(
         perimeter = pts
         corners = [PlanPoint(x=round(p[0], 4), y=round(p[1], 4)) for p in polygon]
 
-        if len(polygon) == 4:
-            rectangular_assumption = _looks_rectangular(polygon)
-
         n = len(polygon)
         for i in range(n):
             a = polygon[i]
@@ -93,8 +90,23 @@ def build_room_geometry(
                 )
             )
         status = EvidenceStatus.INFERRED
+        rectangular_assumption = _looks_rectangular(polygon)
+        correction_description = (
+            "a projective homography"
+            if floorplane.geometry_correction_method == "projective homography"
+            else "an axis-aligned rectangular approximation"
+            if floorplane.geometry_correction_method
+            == "axis-aligned rectangular approximation"
+            else (
+                "a rectangular approximation "
+                f"(method: {floorplane.geometry_correction_method})"
+            )
+        )
         uncertainty_reason = (
-            "Perimeter is the projected visible floor region; walls behind "
+            f"The visible floor outline uses {correction_description}; the "
+            "true room shape and hidden walls are unknown."
+            if rectangular_assumption
+            else "Perimeter is the projected visible floor region; walls behind "
             "the camera or fully occluded are absent and not fabricated."
         )
 
@@ -128,7 +140,7 @@ def build_room_geometry(
                     ),
                 )
             )
-    else:
+    elif not polygon:
         uncertainty_reason = (
             "No reliable floor plane could be estimated; room geometry "
             "is unavailable."
@@ -178,29 +190,24 @@ def build_room_geometry(
 
 
 def _looks_rectangular(polygon: list[tuple[float, float]]) -> bool:
-    """Weak rectangularity cue from opposite edges (assumption only)."""
+    """Return whether the polygon is an axis-aligned rectangle."""
     if len(polygon) != 4:
         return False
-    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = polygon
-
-    def vec(a, b):
-        return (b[0] - a[0], b[1] - a[1])
-
-    def norm(u):
-        return (u[0] ** 2 + u[1] ** 2) ** 0.5
-
-    e0 = vec((x0, y0), (x1, y1))
-    e1 = vec((x1, y1), (x2, y2))
-    e2 = vec((x2, y2), (x3, y3))
-    e3 = vec((x3, y3), (x0, y0))
-
-    n0, n1, n2, n3 = norm(e0), norm(e1), norm(e2), norm(e3)
-    if min(n0, n1, n2, n3) < 1e-6:
-        return False
-    cross01 = abs(e0[0] * e2[1] - e0[1] * e2[0]) / (n0 * n2)
-    cross12 = abs(e1[0] * e3[1] - e1[1] * e3[0]) / (n1 * n3)
-    len_ok = abs(n0 - n2) / max(n0, n2) < 0.35 and abs(n1 - n3) / max(n1, n3) < 0.35
-    return cross01 < 0.35 and cross12 < 0.35 and len_ok
+    edges = [
+        (
+            polygon[(i + 1) % 4][0] - polygon[i][0],
+            polygon[(i + 1) % 4][1] - polygon[i][1],
+        )
+        for i in range(4)
+    ]
+    tolerance = 1e-5
+    horizontal = all(
+        abs(dy) <= tolerance and abs(dx) > tolerance for dx, dy in edges[::2]
+    )
+    vertical = all(
+        abs(dx) <= tolerance and abs(dy) > tolerance for dx, dy in edges[1::2]
+    )
+    return horizontal and vertical
 
 
 def _wall_side(wall: WallSegment) -> str:

@@ -6,35 +6,51 @@ Floor Plan Generator is a two-process system:
 
 - **Frontend** (React + TypeScript + Vite): presentation, user interaction, API
   communication only. It never holds credentials and never runs AI models.
-- **Backend** (Python + FastAPI + LangGraph): image validation, computer-vision
-  pipeline, spatial reasoning, uncertainty assessment, deterministic rendering,
-  artifact management.
+- **Backend** (Python + FastAPI): image validation, local computer vision,
+  spatial-hypothesis construction, uncertainty reporting, deterministic
+  rendering, and artifact management.
 
-All AI reasoning and image processing happens server-side. The frontend receives
-validated JSON and a rendered PNG.
+Image processing and object detection happen server-side. The frontend receives
+validated JSON and a rendered PNG; it does not run models or hold provider keys.
 
 ## Processing pipeline
 
 ```text
 RGB IMAGE
- → validate_input      decode, format/size/pixel checks, EXIF orientation
- → preprocess          RGB normalization, safe resize, artifacts saved
- → estimate_depth      relative depth cues (classical, CPU, no model download)
- → estimate_normals    surface normals derived from depth (assumed pinhole camera)
- → extract_features    deterministic region/edge/color analysis → visual evidence
- → reason_spatial      Groq (if configured) or deterministic evidence-based fallback
- → assess_uncertainty  per-object and global uncertainty, open questions
- → plan_viewpoint      (optional, disabled by default) pick an unresolved question
- → generate_view       (optional, disabled by default) image-conditioned provider
- → verify_candidate    (optional) sanity-check generated candidate
- → update_hypothesis   (optional) merge verified evidence, never overwrite OBSERVED
- → render_floorplan    deterministic Pillow 2D schematic
- → validate_output     schema validation before returning
+ → validate_and_normalize  decode, format/size/pixel checks, EXIF orientation
+ → estimate_depth          relative depth cues (classical, CPU)
+ → estimate_normals        surface normals derived from relative depth
+ → extract_features        deterministic region/edge/color analysis
+ → estimate_floor_plane    segment visible floor and project its outline
+ → rectify_floor_quad      homography maps usable quadrilaterals; a degenerate
+                            quadrilateral falls back to an axis-aligned rectangle
+                            with a bounded, explicitly approximate aspect ratio
+ → normalize_room_plan     final guard rectifies any remaining non-rectangular
+                            outline and composes the transform for object points
+ → detect_objects          local Torchvision SSDlite-MobileNetV3 detector
+ → build_hypothesis        estimate object footprints, fit inside room, note
+                            uncertainty and unresolved overlaps
+ → render_floorplan        deterministic Pillow 2D schematic PNG
+ → validate_output         Pydantic response models
 ```
 
-The pipeline is a LangGraph `StateGraph`. Optional nodes are reached through
-conditional edges; the viewpoint loop is bounded to at most 4 iterations and stops
-early when uncertainty is sufficiently reduced or a provider fails.
+The current `run_pipeline` implementation calls these services directly. It
+uses deterministic hypothesis construction; configured Groq and novel-view
+settings are not invoked by this processing path.
+
+The floor outline is a visible-floor estimate, not a verified room perimeter.
+The homography uses the visible quadrilateral and its projected edge proportions
+to produce a cleaner rectangular approximation; when homography is unavailable,
+the axis-aligned ground-plane bounds provide a labeled rectangular approximation
+with its aspect ratio clamped to avoid a degenerate sliver.
+Neither method recovers hidden walls or proves that the real room is rectangular.
+As a final guard, any non-rectangular plan outline is normalized before the
+hypothesis is built; the same composed transform is applied to object floor
+positions, wall cues, and openings. The result JSON includes geometry diagnostics:
+source ground-plane corners, correction method/fallback reason, corrected plan
+corners, and the perimeter/wall segments passed to the renderer.
+The renderer uses equal pixel scale on both plan axes to avoid stretching the room
+or furniture symbols.
 
 ## Module responsibilities
 
@@ -43,18 +59,19 @@ early when uncertainty is sufficiently reduced or a provider fails.
 | `app.core.config` | Pydantic-settings based configuration from env |
 | `app.core.errors` | typed application errors → safe API responses |
 | `app.schemas.spatial` | versioned spatial data contract (Pydantic) |
-| `app.services.image_validation` | real image decoding and limit enforcement |
-| `app.services.preprocessing` | orientation normalization, resize, color conversion |
+| `app.services.pipeline` | orchestration of the baseline image-to-floor-plan stages |
+| `app.services.image_validation` | real image decoding, orientation, and limit enforcement |
 | `app.services.depth` | `DepthEstimator` interface + classical CPU implementation |
+| `app.services.floorplane` | visible-floor segmentation and projective plan normalization |
 | `app.services.normals` | depth → normals with documented camera convention |
 | `app.services.features` | deterministic visual evidence extraction |
-| `app.services.reasoning` | spatial hypothesis construction (Groq or fallback) |
+| `app.services.detection` | local pretrained Torchvision object detection |
+| `app.services.hypothesis` | deterministic object placement and uncertainty construction |
+| `app.services.layout` | footprint fitting, room containment, and overlap checks |
+| `app.services.room_geometry` | wall perimeter and uncertain opening attachment |
 | `app.services.renderer` | deterministic floor-plan PNG rendering |
-| `app.tools.groq_client` | bounded Groq API client with retries |
-| `app.tools.novel_view` | optional image-generation provider interface (disabled) |
-| `app.nodes` | thin LangGraph node wrappers |
-| `app.graph` | graph topology, conditional edges, termination |
 | `app.api` | FastAPI routes, job lifecycle, artifact serving |
+| `app.schemas` | validated API and spatial data contracts |
 
 ## Coordinate conventions
 
@@ -74,10 +91,10 @@ local prototype.
 
 ## Replaceability
 
-- Depth: swap `DepthEstimator` implementation (e.g. MiDaS adapter) without touching
-  the graph.
-- Reasoning: Groq is behind an interface; the fallback is explicit and identified.
-- Novel views: provider interface, disabled unless explicitly configured.
+- Depth, features, and detection use interfaces so implementations can be replaced
+  without changing the route or result schema.
+- The current pipeline uses deterministic hypothesis construction; optional
+  provider settings are not invoked by `run_pipeline`.
 
 ## Security posture
 

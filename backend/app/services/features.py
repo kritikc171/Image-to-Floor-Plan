@@ -12,15 +12,15 @@ Important conventions
 - ``strength`` is a heuristic edge-strength score, NOT a
   calibrated probability.
 - Labels are generic geometric descriptions ("wide surface",
-  "vertical structure"). Specific furniture claims require the
-  reasoning stage and are always marked INFERRED.
+  "vertical structure"). Shape-based furniture candidates are
+  explicitly labeled as possible rather than confirmed.
 - Image-space boxes are never treated as world-space positions;
   floor-plane projection happens in the plan transform.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Protocol
 
 import numpy as np
@@ -66,21 +66,276 @@ class VisualEvidence:
 
 @dataclass(frozen=True)
 class PlanTransform:
-    """Affine map from ground-plane (IPM) coords to plan coords.
+    """Map from ground-plane (IPM) coords to plan coords.
 
-    Built from an inverse-perspective (ground-plane) projection
-    under the assumption that the camera optical axis is
-    parallel to the floor (no pitch) — a stated assumption, not
-    a measurement.
+    The baseline affine form is used for weak-evidence fallback.
+    A homography is used when a visible floor quadrilateral can be rectified;
+    it maps the boundary and object contact points consistently.
     """
 
     sx: float
     sy: float
     ox: float
     oy: float
+    homography: tuple[float, ...] | None = None
 
     def apply(self, x: float, y: float) -> tuple[float, float]:
+        if self.homography is not None:
+            h = self.homography
+            denominator = h[6] * x + h[7] * y + h[8]
+            if abs(denominator) < 1e-12:
+                return (float("inf"), float("inf"))
+            return (
+                (h[0] * x + h[1] * y + h[2]) / denominator,
+                (h[3] * x + h[4] * y + h[5]) / denominator,
+            )
         return (self.sx * x + self.ox, self.sy * y + self.oy)
+
+
+def rectify_ground_quad(
+    corners: list[tuple[float, float]],
+) -> tuple[PlanTransform, list[tuple[float, float]]] | None:
+    """Projectively rectify an ordered floor quadrilateral to a rectangle.
+
+    The rectangle's aspect ratio comes from the average lengths of opposite
+    edges in the estimated ground plane. Its longer side occupies 90% of the
+    normalized plan range. This is a clearly approximate room-shape assumption,
+    not recovery of hidden walls or architectural dimensions.
+    """
+    if len(corners) != 4 or not all(
+        np.isfinite(value) for point in corners for value in point
+    ):
+        return None
+
+    edges = [
+        (corners[(i + 1) % 4][0] - corners[i][0],
+         corners[(i + 1) % 4][1] - corners[i][1])
+        for i in range(4)
+    ]
+    lengths = [float(np.hypot(dx, dy)) for dx, dy in edges]
+    if min(lengths) <= 1e-9:
+        return None
+
+    turns = [
+        edges[i][0] * edges[(i + 1) % 4][1]
+        - edges[i][1] * edges[(i + 1) % 4][0]
+        for i in range(4)
+    ]
+    if not (all(turn > 1e-9 for turn in turns) or all(turn < -1e-9 for turn in turns)):
+        return None
+
+    width = (lengths[0] + lengths[2]) / 2.0
+    depth = (lengths[1] + lengths[3]) / 2.0
+    if width <= 1e-9 or depth <= 1e-9:
+        return None
+
+    scale = 0.9 / max(width, depth)
+    plan_width = width * scale
+    plan_depth = depth * scale
+    left = (1.0 - plan_width) / 2.0
+    top = (1.0 - plan_depth) / 2.0
+    targets = [
+        (left, top),
+        (left + plan_width, top),
+        (left + plan_width, top + plan_depth),
+        (left, top + plan_depth),
+    ]
+
+    source = np.asarray(corners, dtype=np.float64)
+    target = np.asarray(targets, dtype=np.float64)
+
+    def normalize(points: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+        center = points.mean(axis=0)
+        mean_distance = float(np.linalg.norm(points - center, axis=1).mean())
+        if mean_distance <= 1e-12:
+            return None
+        scale = np.sqrt(2.0) / mean_distance
+        matrix = np.asarray(
+            [
+                [scale, 0.0, -scale * center[0]],
+                [0.0, scale, -scale * center[1]],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        normalized = (points - center) * scale
+        return normalized, matrix
+
+    normalized_source = normalize(source)
+    normalized_target = normalize(target)
+    if normalized_source is None or normalized_target is None:
+        return None
+    src, source_matrix = normalized_source
+    dst, target_matrix = normalized_target
+
+    equations: list[list[float]] = []
+    values: list[float] = []
+    for (x, y), (u, v) in zip(src, dst):
+        equations.append([x, y, 1.0, 0.0, 0.0, 0.0, -u * x, -u * y])
+        values.append(u)
+        equations.append([0.0, 0.0, 0.0, x, y, 1.0, -v * x, -v * y])
+        values.append(v)
+
+    matrix = np.asarray(equations, dtype=np.float64)
+    condition = np.linalg.cond(matrix)
+    if not np.isfinite(condition) or condition > 1e12:
+        return None
+    try:
+        normalized_coefficients = np.linalg.solve(
+            matrix, np.asarray(values, dtype=np.float64)
+        )
+    except np.linalg.LinAlgError:
+        return None
+    if not np.isfinite(normalized_coefficients).all():
+        return None
+
+    normalized_homography = np.append(normalized_coefficients, 1.0).reshape(3, 3)
+    homography = np.linalg.inv(target_matrix) @ normalized_homography @ source_matrix
+    if not np.isfinite(homography).all() or np.max(np.abs(homography)) <= 1e-12:
+        return None
+    coefficients = tuple(float(value) for value in homography.ravel())
+    transform = PlanTransform(
+        sx=1.0,
+        sy=1.0,
+        ox=0.0,
+        oy=0.0,
+        homography=coefficients,
+    )
+    polygon = [transform.apply(*point) for point in corners]
+    if not all(np.isfinite(value) for point in polygon for value in point):
+        return None
+    return transform, polygon
+
+
+def approximate_ground_quad(
+    corners: list[tuple[float, float]],
+) -> tuple[PlanTransform, list[tuple[float, float]]] | None:
+    """Map finite ground-plane bounds to a centered rectangle approximation."""
+    if len(corners) != 4 or not all(
+        np.isfinite(value) for point in corners for value in point
+    ):
+        return None
+
+    xs = [point[0] for point in corners]
+    ys = [point[1] for point in corners]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x, span_y = max_x - min_x, max_y - min_y
+    if span_x <= 1e-9 or span_y <= 1e-9:
+        return None
+
+    aspect = min(max(span_x / span_y, 0.65), 1.6)
+    if aspect >= 1.0:
+        plan_width, plan_height = 0.9, 0.9 / aspect
+    else:
+        plan_width, plan_height = 0.9 * aspect, 0.9
+    left, top = (1.0 - plan_width) / 2.0, (1.0 - plan_height) / 2.0
+    transform = PlanTransform(
+        sx=plan_width / span_x,
+        sy=plan_height / span_y,
+        ox=left - min_x * (plan_width / span_x),
+        oy=top - min_y * (plan_height / span_y),
+    )
+    rectangle = [
+        (left, top),
+        (left + plan_width, top),
+        (left + plan_width, top + plan_height),
+        (left, top + plan_height),
+    ]
+    return transform, rectangle
+
+
+def normalize_floor_plan_geometry(
+    features: FeatureExtractionResult,
+) -> FeatureExtractionResult:
+    """Ensure every usable room outline is rectangular before placing objects."""
+    polygon = features.floor_polygon
+    source_transform = features.plan_transform
+    if not polygon or source_transform is None:
+        return features
+
+    points = list(polygon)
+    if len(points) > 1 and np.allclose(points[0], points[-1]):
+        points.pop()
+    if len(points) < 3 or _is_axis_aligned_rectangle(points):
+        return features
+
+    correction_method = "projective homography"
+    fallback_reason = None
+    correction = rectify_ground_quad(points) if len(points) == 4 else None
+    if correction is None:
+        min_x = min(point[0] for point in points)
+        max_x = max(point[0] for point in points)
+        min_y = min(point[1] for point in points)
+        max_y = max(point[1] for point in points)
+        bounds = [
+            (min_x, min_y),
+            (max_x, min_y),
+            (max_x, max_y),
+            (min_x, max_y),
+        ]
+        correction = approximate_ground_quad(bounds)
+        correction_method = "axis-aligned rectangular approximation"
+        fallback_reason = (
+            "The room outline was not a usable convex quadrilateral; "
+            "used bounded ground-plane bounds for a rectangular approximation."
+        )
+    if correction is None:
+        return features
+
+    plan_correction, corrected_polygon = correction
+    original_matrix = (
+        np.asarray(source_transform.homography, dtype=np.float64).reshape(3, 3)
+        if source_transform.homography is not None
+        else np.asarray(
+            [
+                [source_transform.sx, 0.0, source_transform.ox],
+                [0.0, source_transform.sy, source_transform.oy],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+    )
+    correction_matrix = np.asarray(
+        plan_correction.homography, dtype=np.float64
+    ).reshape(3, 3)
+    combined = correction_matrix @ original_matrix
+    transform = PlanTransform(
+        sx=1.0,
+        sy=1.0,
+        ox=0.0,
+        oy=0.0,
+        homography=tuple(float(value) for value in combined.ravel()),
+    )
+
+    return replace(
+        features,
+        floor_polygon=corrected_polygon,
+        plan_transform=transform,
+        wall_lines=[
+            [plan_correction.apply(*point) for point in line]
+            for line in features.wall_lines
+        ],
+        vanishing_point=(
+            plan_correction.apply(*features.vanishing_point)
+            if features.vanishing_point is not None
+            else None
+        ),
+        geometry_correction_method=correction_method,
+        geometry_fallback_reason=fallback_reason,
+    )
+
+
+def _is_axis_aligned_rectangle(
+    points: list[tuple[float, float]],
+) -> bool:
+    if len(points) != 4:
+        return False
+    return all(
+        abs(points[index][0] - points[(index + 1) % 4][0]) <= 1e-6
+        or abs(points[index][1] - points[(index + 1) % 4][1]) <= 1e-6
+        for index in range(4)
+    )
 
 
 @dataclass(frozen=True)
@@ -100,6 +355,10 @@ class FeatureExtractionResult:
     vanishing_point: Optional[tuple[float, float]] = None
     camera_pitch_deg: Optional[float] = None
     floorplane_quality: Optional[str] = None  # "good" | "poor" | "none"
+    source_ground_corners: list[tuple[float, float]] = field(default_factory=list)
+    geometry_correction_method: str = "unknown"
+    geometry_fallback_reason: Optional[str] = None
+    geometry_source: str = "classical-fallback"
 
     def to_plan(
         self, x_norm: float, y_norm: float
@@ -165,9 +424,13 @@ class FeatureExtractionResult:
         # A projection whose vertical coordinate falls outside the unit
         # plan cannot be a defensible top-down position; mark it as
         # unavailable (None) instead of silently clamping it to y=0.
-        if not (0.0 <= py <= 1.0):
+        if not (
+            np.isfinite(px)
+            and np.isfinite(py)
+            and 0.0 <= px <= 1.0
+            and 0.0 <= py <= 1.0
+        ):
             return None
-        px = min(max(px, 0.0), 1.0)
         return (px, py)
 
 
@@ -282,7 +545,7 @@ class ClassicalFeatureExtractor:
         # Floor geometry: approximate the visible floor region as the
         # region below the horizon, bounded by strong vertical edges
         # when present, else the full frame width.
-        floor_polygon, transform = _floor_geometry(
+        floor_polygon, transform, geometry_info = _floor_geometry(
             image.size[0], image.size[1], horizon, objects
         )
 
@@ -295,6 +558,9 @@ class ClassicalFeatureExtractor:
             floor_polygon=floor_polygon,
             plan_transform=transform,
             floor_pixel_ratio=floor_pixel_ratio(normals),
+            source_ground_corners=geometry_info["source_ground_corners"],
+            geometry_correction_method=geometry_info["correction_method"],
+            geometry_fallback_reason=geometry_info["fallback_reason"],
         )
 
 
@@ -318,7 +584,11 @@ def _floor_geometry(
     height: int,
     horizon: float,
     objects: list[VisualEvidence],
-) -> tuple[list[tuple[float, float]] | None, PlanTransform | None]:
+) -> tuple[
+    list[tuple[float, float]] | None,
+    PlanTransform | None,
+    dict[str, object],
+]:
     """Project the visible floor region to plan space.
 
     Uses inverse-perspective mapping for a ground plane:
@@ -330,7 +600,11 @@ def _floor_geometry(
     stays consistent with ``FeatureExtractionResult.project_ground``.
     """
     if horizon <= 0 or horizon >= height - 4:
-        return None, None
+        return None, None, {
+            "source_ground_corners": [],
+            "correction_method": "unavailable",
+            "fallback_reason": "The horizon estimate is outside the usable image.",
+        }
 
     margin = max(2.0, 0.05 * height)
     far_y = horizon + margin
@@ -347,22 +621,31 @@ def _floor_geometry(
         ipm(0.0, height - 1),      # near-left
     ]
 
-    xs = [c[0] for c in corners]
-    ys = [c[1] for c in corners]
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-    span_x = max_x - min_x if max_x > min_x else 1.0
-    span_y = max_y - min_y if max_y > min_y else 1.0
+    rectified = rectify_ground_quad(corners)
+    if rectified is not None:
+        transform, polygon = rectified
+        return polygon, transform, {
+            "source_ground_corners": corners,
+            "correction_method": "projective homography",
+            "fallback_reason": None,
+        }
 
-    transform = PlanTransform(
-        sx=0.9 / span_x,
-        sy=0.9 / span_y,
-        ox=0.05 - min_x * (0.9 / span_x),
-        oy=0.05 - min_y * (0.9 / span_y),
-    )
-
-    polygon = [transform.apply(*c) for c in corners]
-    return polygon, transform
+    approximation = approximate_ground_quad(corners)
+    if approximation is None:
+        return None, None, {
+            "source_ground_corners": corners,
+            "correction_method": "unavailable",
+            "fallback_reason": "The ground-plane corner bounds are degenerate.",
+        }
+    transform, polygon = approximation
+    return polygon, transform, {
+        "source_ground_corners": corners,
+        "correction_method": "axis-aligned rectangular approximation",
+        "fallback_reason": (
+            "The floor quadrilateral was degenerate or non-convex; "
+            "used its ground-plane bounds as a rectangular approximation."
+        ),
+    }
 
 
 def _downscale(image: Image.Image, max_dimension: int) -> Image.Image:

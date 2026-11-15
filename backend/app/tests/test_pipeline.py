@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from app.services.depth import (
@@ -15,6 +16,9 @@ from app.services.depth import (
 from app.services.features import (
     ClassicalFeatureExtractor,
     FeatureExtractionResult,
+    VisualEvidence,
+    PlanTransform,
+    normalize_floor_plan_geometry,
 )
 from app.services.floorplane import FloorPlaneEstimator
 from app.services.hypothesis import build_hypothesis
@@ -122,7 +126,7 @@ def test_hypothesis_marks_floor_objects_inferred():
         FeatureExtractionResult,
     )
 
-    transform = PlanTransform(sx=0.5, sy=0.5, ox=0.25, oy=0.25)
+    transform = PlanTransform(sx=0.15, sy=10.0, ox=0.5, oy=0.4)
     result = FeatureExtractionResult(
         image_width=320,
         image_height=240,
@@ -239,6 +243,13 @@ def test_floor_plane_projects_below_horizon_to_valid_plan():
     assert floorplane.transform is not None
     assert floorplane.floor_polygon is not None
     assert len(floorplane.floor_polygon) >= 3
+    assert floorplane.transform.homography is not None
+    assert len(floorplane.floor_polygon) == 4
+    corners = floorplane.floor_polygon
+    assert corners[0][1] == pytest.approx(corners[1][1])
+    assert corners[1][0] == pytest.approx(corners[2][0])
+    assert corners[2][1] == pytest.approx(corners[3][1])
+    assert corners[3][0] == pytest.approx(corners[0][0])
 
     feats = FeatureExtractionResult(
         image_width=w,
@@ -261,3 +272,181 @@ def test_floor_plane_projects_below_horizon_to_valid_plan():
     # A point on/above the horizon has no finite floor projection.
     assert feats.project_ground(0.5, horizon / h) is None
 
+
+def test_projective_floor_transform_keeps_left_right_object_order():
+    h, w = 120, 160
+    horizon = 55
+    mask = np.zeros((h, w), dtype=bool)
+    for y in range(60, h - 1):
+        half_width = 20 + (y - 60) * 0.45
+        center = (w - 1) / 2
+        mask[y, int(center - half_width):int(center + half_width) + 1] = True
+
+    from app.services.floorplane import _floor_polygon_and_transform
+
+    polygon, transform, _ = _floor_polygon_and_transform(
+        w, h, horizon, mask, w, h, horizon
+    )
+    assert polygon is not None
+    assert transform is not None
+    assert len(polygon) == 4
+    assert polygon[0][1] == pytest.approx(polygon[1][1])
+    assert polygon[1][0] == pytest.approx(polygon[2][0])
+    assert polygon[2][1] == pytest.approx(polygon[3][1])
+    assert polygon[3][0] == pytest.approx(polygon[0][0])
+
+    features = FeatureExtractionResult(
+        image_width=w,
+        image_height=h,
+        horizon_y=float(horizon),
+        objects=[],
+        openings=[],
+        floor_polygon=polygon,
+        plan_transform=transform,
+    )
+    left = features.project_ground(0.35, 0.82)
+    right = features.project_ground(0.65, 0.82)
+    assert left is not None and right is not None
+    assert left[0] < right[0]
+
+
+def test_rejected_floor_quad_uses_rectangular_fallback_through_rendering(monkeypatch):
+    from app.services.floorplane import _floor_polygon_and_transform
+
+    h, w, horizon = 120, 160, 55
+    mask = np.zeros((h, w), dtype=bool)
+    for y in range(60, h - 1):
+        half_width = 20 + (y - 60) * 0.45
+        center = (w - 1) / 2
+        mask[y, int(center - half_width):int(center + half_width) + 1] = True
+
+    monkeypatch.setattr(
+        "app.services.floorplane.rectify_ground_quad",
+        lambda _corners: None,
+    )
+    polygon, transform, info = _floor_polygon_and_transform(
+        w, h, horizon, mask, w, h, horizon
+    )
+    assert polygon is not None and transform is not None
+    assert info["correction_method"] == "axis-aligned rectangular approximation"
+    assert info["fallback_reason"]
+    assert [point[0] for point in polygon] == pytest.approx(
+        [polygon[0][0], polygon[1][0], polygon[1][0], polygon[0][0]]
+    )
+    assert [point[1] for point in polygon] == pytest.approx(
+        [polygon[0][1], polygon[0][1], polygon[2][1], polygon[2][1]]
+    )
+    aspect = (polygon[1][0] - polygon[0][0]) / (
+        polygon[2][1] - polygon[1][1]
+    )
+    assert 0.65 <= aspect <= 1.6
+
+    evidence = VisualEvidence(
+        id="fallback-object",
+        kind="object",
+        label="wide surface",
+        bbox=(0.25, 0.6, 0.48, 0.8),
+        centroid=(0.365, 0.7),
+        color=(80, 90, 100),
+        area_fraction=0.05,
+        strength=0.8,
+        floor_level=True,
+    )
+    features = FeatureExtractionResult(
+        image_width=w,
+        image_height=h,
+        horizon_y=float(horizon),
+        objects=[evidence],
+        openings=[],
+        floor_polygon=polygon,
+        plan_transform=transform,
+        source_ground_corners=info["source_ground_corners"],
+        geometry_correction_method=info["correction_method"],
+        geometry_fallback_reason=info["fallback_reason"],
+    )
+    hypothesis = build_hypothesis(features)
+    geometry = hypothesis.room_geometry
+    assert geometry is not None
+    diagnostics = hypothesis.geometry_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.homography_applied is False
+    assert diagnostics.fallback_reason == info["fallback_reason"]
+    assert diagnostics.corrected_room_corners == geometry.corners
+    assert diagnostics.renderer_perimeter == geometry.perimeter
+    assert len(diagnostics.renderer_wall_segments) == 4
+    assert hypothesis.objects[0].position is not None
+    assert hypothesis.objects[0].label == "possible table"
+
+    output = Image.open(io.BytesIO(render_floorplan(hypothesis, "fallback")))
+    assert output.size == (1400, 1000)
+    assert output.format == "PNG"
+
+
+def test_classical_floor_geometry_fallback_is_rectangular(monkeypatch):
+    from app.services.features import _floor_geometry
+
+    monkeypatch.setattr(
+        "app.services.features.rectify_ground_quad",
+        lambda _corners: None,
+    )
+    polygon, transform, info = _floor_geometry(160, 120, 55.0, [])
+    assert polygon is not None and transform is not None
+    assert info["correction_method"] == "axis-aligned rectangular approximation"
+    assert info["fallback_reason"]
+    assert [point[0] for point in polygon] == pytest.approx(
+        [polygon[0][0], polygon[1][0], polygon[1][0], polygon[0][0]]
+    )
+    assert [point[1] for point in polygon] == pytest.approx(
+        [polygon[0][1], polygon[0][1], polygon[2][1], polygon[2][1]]
+    )
+    aspect = (polygon[1][0] - polygon[0][0]) / (
+        polygon[2][1] - polygon[1][1]
+    )
+    assert 0.65 <= aspect <= 1.6
+
+
+def test_pipeline_normalizes_trapezoid_before_hypothesis_and_rendering():
+    features = FeatureExtractionResult(
+        image_width=100,
+        image_height=100,
+        horizon_y=20.0,
+        objects=[],
+        openings=[],
+        floor_polygon=[
+            (0.20, 0.20),
+            (0.80, 0.30),
+            (0.75, 0.90),
+            (0.25, 0.80),
+        ],
+        plan_transform=PlanTransform(
+            sx=0.15,
+            sy=30.0,
+            ox=0.5,
+            oy=0.05,
+        ),
+    )
+    left_before = features.project_ground(0.3, 0.8)
+    right_before = features.project_ground(0.7, 0.8)
+    assert left_before is not None and right_before is not None
+    assert left_before[0] < right_before[0]
+
+    normalized = normalize_floor_plan_geometry(features)
+    left_after = normalized.project_ground(0.3, 0.8)
+    right_after = normalized.project_ground(0.7, 0.8)
+    assert left_after is not None and right_after is not None
+    assert left_after[0] < right_after[0]
+
+    hypothesis = build_hypothesis(normalized)
+    geometry = hypothesis.room_geometry
+    assert geometry is not None and geometry.rectangular_assumption
+    assert all(
+        abs(a.x - b.x) < 1e-4 or abs(a.y - b.y) < 1e-4
+        for a, b in zip(geometry.corners, geometry.corners[1:] + geometry.corners[:1])
+    )
+    diagnostics = hypothesis.geometry_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.correction_method == "projective homography"
+    assert diagnostics.renderer_perimeter == geometry.perimeter
+
+    png = render_floorplan(hypothesis, "rectangularized-trapezoid")
+    assert Image.open(io.BytesIO(png)).size == (1400, 1000)

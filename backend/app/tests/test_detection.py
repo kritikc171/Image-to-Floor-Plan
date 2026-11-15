@@ -10,6 +10,7 @@ from PIL import Image
 
 from app.services.detection import (
     DETECTION_SOURCE,
+    Detection,
     TorchVisionDetector,
     UnavailableDetector,
 )
@@ -35,6 +36,36 @@ from app.services.image_validation import ValidatedImage
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 FIXTURE = os.path.join(ROOT, "test_floorplan.png")
+
+
+def test_detector_suppresses_near_identical_cross_class_boxes():
+    detections = [
+        Detection(
+            id="det-000",
+            class_name="chair",
+            label="chair",
+            bbox=(0.2, 0.2, 0.6, 0.7),
+            confidence=0.72,
+        ),
+        Detection(
+            id="det-001",
+            class_name="couch",
+            label="couch",
+            bbox=(0.205, 0.205, 0.595, 0.695),
+            confidence=0.61,
+        ),
+        Detection(
+            id="det-002",
+            class_name="bed",
+            label="bed",
+            bbox=(0.65, 0.25, 0.95, 0.8),
+            confidence=0.58,
+        ),
+    ]
+
+    result = TorchVisionDetector._deduplicate(detections)
+
+    assert [item.id for item in result] == ["det-000", "det-002"]
 
 
 def _depth_result() -> DepthResult:
@@ -82,7 +113,7 @@ def test_detector_supported_classes_cover_indoor_subset():
 
 
 def test_hypothesis_marks_detector_evidence_observed():
-    transform = PlanTransform(sx=0.5, sy=0.5, ox=0.25, oy=0.25)
+    transform = PlanTransform(sx=0.15, sy=10.0, ox=0.5, oy=0.4)
     features = _features(
         objects=[
             VisualEvidence(
@@ -116,7 +147,7 @@ def test_hypothesis_marks_detector_evidence_observed():
 
 
 def test_hypothesis_detector_above_floor_keeps_detection_without_position():
-    transform = PlanTransform(sx=0.5, sy=0.5, ox=0.25, oy=0.25)
+    transform = PlanTransform(sx=0.15, sy=10.0, ox=0.5, oy=0.4)
     features = _features(
         objects=[
             VisualEvidence(
@@ -195,4 +226,3 @@ def test_detector_runs_on_photo_returns_valid_schema():
         x0, y0, x1, y1 = det.bbox
         assert 0.0 <= x0 < x1 <= 1.0
         assert 0.0 <= y0 < y1 <= 1.0
-

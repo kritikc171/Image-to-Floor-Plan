@@ -125,6 +125,30 @@ class TorchVisionDetector:
             model.eval()
             self._model = model
 
+    @staticmethod
+    def _deduplicate(detections: list[Detection]) -> list[Detection]:
+        """Suppress near-identical cross-class boxes, keeping the best score."""
+        kept: list[Detection] = []
+        for candidate in sorted(
+            detections, key=lambda item: item.confidence, reverse=True
+        ):
+            x0, y0, x1, y1 = candidate.bbox
+            duplicate = False
+            for existing in kept:
+                a0, b0, a1, b1 = existing.bbox
+                ix = max(0.0, min(x1, a1) - max(x0, a0))
+                iy = max(0.0, min(y1, b1) - max(y0, b0))
+                intersection = ix * iy
+                area_candidate = (x1 - x0) * (y1 - y0)
+                area_existing = (a1 - a0) * (b1 - b0)
+                union = area_candidate + area_existing - intersection
+                if union > 0 and intersection / union >= 0.85:
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append(candidate)
+        return kept
+
     def detect(self, image: Image.Image) -> DetectionResult:
         """Run detection on ``image``; never raises for model errors."""
         if torch is None or ssdlite320_mobilenet_v3_large is None or to_image is None:
@@ -182,7 +206,7 @@ class TorchVisionDetector:
                 )
             )
 
-        detections.sort(key=lambda item: item.confidence, reverse=True)
+        detections = self._deduplicate(detections)
         return DetectionResult(detections, self.model_name, True)
 
 

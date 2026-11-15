@@ -18,23 +18,25 @@ import io
 import numpy as np
 import pytest
 from PIL import Image
+from PIL import ImageDraw
 
 from app.services.features import (
     ClassicalFeatureExtractor,
     FLOOR_LEVEL_MARGIN,
     PlanTransform,
+    rectify_ground_quad,
     VisualEvidence,
     FeatureExtractionResult,
 )
 from app.services.hypothesis import build_hypothesis
 from app.services.layout import rect, rect_inside_poly, fit_footprint, resolve_overlap
-from app.services.renderer import render_floorplan
+from app.services.renderer import _plan_region, plan_to_px, render_floorplan
 from app.services.footprint import footprint_for, prior_for
 
 # A simple rectangular room in normalized plan space.
 ROOM = [(0.05, 0.10), (0.95, 0.10), (0.95, 0.90), (0.05, 0.90)]
 
-TRANSFORM = PlanTransform(sx=0.5, sy=0.5, ox=0.25, oy=0.25)
+TRANSFORM = PlanTransform(sx=0.15, sy=10.0, ox=0.5, oy=0.4)
 
 
 def _features(objects, polygon=ROOM, transform=TRANSFORM) -> FeatureExtractionResult:
@@ -74,6 +76,75 @@ def test_fit_footprint_stays_inside_convex_room():
     assert rect_inside_poly(rect(cx, cy, w, d), ROOM)
 
 
+def test_projective_rectification_maps_trapezoid_to_aspect_preserving_rectangle():
+    trapezoid = [(-2.0, 4.0), (2.0, 4.0), (1.2, 1.0), (-1.0, 1.0)]
+    result = rectify_ground_quad(trapezoid)
+    assert result is not None
+    transform, polygon = result
+
+    transformed_corners = [transform.apply(*point) for point in trapezoid]
+    for actual, expected in zip(polygon, transformed_corners):
+        assert actual == pytest.approx(expected)
+    assert [point[0] for point in polygon] == pytest.approx(
+        [polygon[0][0], polygon[1][0], polygon[1][0], polygon[0][0]]
+    )
+    assert [point[1] for point in polygon] == pytest.approx(
+        [polygon[0][1], polygon[0][1], polygon[2][1], polygon[2][1]]
+    )
+    far_midpoint = transform.apply(
+        (trapezoid[0][0] + trapezoid[1][0]) / 2,
+        (trapezoid[0][1] + trapezoid[1][1]) / 2,
+    )
+    near_midpoint = transform.apply(
+        (trapezoid[2][0] + trapezoid[3][0]) / 2,
+        (trapezoid[2][1] + trapezoid[3][1]) / 2,
+    )
+    assert far_midpoint[0] == pytest.approx(0.5)
+    assert near_midpoint[0] == pytest.approx(0.5)
+    expected_width = (4.0 + 2.2) / 2
+    expected_depth = ((0.8**2 + 3.0**2) ** 0.5 + (1.0**2 + 3.0**2) ** 0.5) / 2
+    assert (polygon[1][0] - polygon[0][0]) / (
+        polygon[2][1] - polygon[1][1]
+    ) == pytest.approx(expected_width / expected_depth)
+
+
+def test_rectified_room_geometry_is_marked_as_an_approximation():
+    trapezoid = [(-2.0, 4.0), (2.0, 4.0), (1.2, 1.0), (-1.0, 1.0)]
+    rectified = rectify_ground_quad(trapezoid)
+    assert rectified is not None
+    transform, polygon = rectified
+    features = FeatureExtractionResult(
+        image_width=320,
+        image_height=240,
+        horizon_y=120.0,
+        objects=[],
+        openings=[],
+        floor_polygon=polygon,
+        plan_transform=transform,
+    )
+    hypothesis = build_hypothesis(features)
+    geometry = hypothesis.room_geometry
+    assert geometry is not None
+    assert geometry.rectangular_assumption is True
+    assert "rectangular approximation" in (geometry.uncertainty_reason or "")
+    assert all(
+        abs(wall.start.x - wall.end.x) < 1e-4
+        or abs(wall.start.y - wall.end.y) < 1e-4
+        for wall in geometry.walls
+        if not wall.id.startswith("wall-wl-")
+    )
+    assert any("true room shape" in item for item in hypothesis.uncertainty.assumptions)
+
+
+def test_renderer_uses_equal_pixel_scale_for_plan_axes():
+    plan = _plan_region(ImageDraw.Draw(Image.new("RGB", (1400, 1000))))
+    assert plan["inner_w"] == plan["inner_h"]
+    x0, y0 = plan_to_px(0.0, 0.0, plan)
+    x1, _ = plan_to_px(0.1, 0.0, plan)
+    _, y1 = plan_to_px(0.0, 0.1, plan)
+    assert abs(x1 - x0) == pytest.approx(abs(y1 - y0))
+
+
 def test_resolve_overlap_separates_without_leaving_room():
     r1 = rect(0.5, 0.5, 0.2, 0.2)
     r2 = rect(0.55, 0.5, 0.2, 0.2)  # overlaps r1
@@ -109,17 +180,14 @@ def test_project_ground_returns_none_at_or_above_horizon():
 
 
 def test_invalid_position_is_never_defaulted_to_zero():
-    # A ground point projecting outside the plan laterally must be
-    # unavailable (None), not silently clamped to y = 0.
+    # A point outside the visible plan must be unavailable rather than
+    # clamped onto the room edge.
     transform = PlanTransform(sx=0.5, sy=0.5, ox=0.25, oy=0.25)
     feats = FeatureExtractionResult(
         image_width=320, image_height=240, horizon_y=120.0, objects=[],
         openings=[], floor_polygon=ROOM, plan_transform=transform,
     )
-    # Far to the side projects to a negative/large plan x; clamp keeps
-    # it in [0,1] but py must remain valid. The key contract: None when
-    # py falls outside [0,1] rather than inventing y = 0.
-    assert feats.project_ground(0.02, 0.8) is not None
+    assert feats.project_ground(0.02, 0.8) is None
 
 
 def test_floor_level_objects_are_placed_inside_room():
@@ -157,7 +225,7 @@ def test_unplaced_objects_are_preserved_and_not_fabricated():
     assert len(hypothesis.objects) == 1
     o = hypothesis.objects[0]
     assert o.position is None
-    assert o.label == "tv"  # detection preserved, not dropped
+    assert o.label == "possible tv"  # unverified label remains explicit
 
 
 def test_footprint_priors_differ_by_class():

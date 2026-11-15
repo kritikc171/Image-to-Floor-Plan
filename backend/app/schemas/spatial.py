@@ -133,6 +133,19 @@ class WallSegment(BaseModel):
     uncertainty_reason: Optional[str] = None
 
 
+class GeometryDiagnostics(BaseModel):
+    """Source, correction, and final coordinates used to draw the room."""
+
+    geometry_source: str = "unknown"
+    source_ground_corners: List[tuple[float, float]] = Field(default_factory=list)
+    homography_applied: bool = False
+    correction_method: str
+    fallback_reason: Optional[str] = None
+    corrected_room_corners: List[PlanPoint] = Field(default_factory=list)
+    renderer_perimeter: List[PlanPoint] = Field(default_factory=list)
+    renderer_wall_segments: List[WallSegment] = Field(default_factory=list)
+
+
 class Opening(BaseModel):
     """Door or window candidate located on a wall segment."""
 
@@ -194,6 +207,7 @@ class SpatialHypothesis(BaseModel):
     schema_version: str = SCHEMA_VERSION
     room_boundary: RoomBoundary
     room_geometry: Optional[RoomGeometry] = None
+    geometry_diagnostics: Optional[GeometryDiagnostics] = None
     objects: List[SpatialObject] = Field(default_factory=list)
     openings: List[Opening] = Field(default_factory=list)
     uncertainty: UncertaintySummary

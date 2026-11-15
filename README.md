@@ -11,12 +11,17 @@ downloadable schematic PNG.
 
 ## Quick start
 
+Run the backend and frontend in **two separate PowerShell terminals**. In each
+terminal, start from the project root.
+
 ### Prerequisites
 - Python 3.13 (verified with 3.13.12; required by the pinned CV/AI stack)
 - Node.js 24 and npm 12 (verified)
 - Git
 
 ### Backend
+
+In Terminal 1:
 
 ```powershell
 cd backend
@@ -29,6 +34,8 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ### Frontend
 
+In Terminal 2, starting from the project root:
+
 ```powershell
 cd frontend
 npm install
@@ -37,24 +44,32 @@ npm run dev        # http://localhost:5173
 
 ### Tests
 
+Run each test suite from a separate terminal, starting from the project root.
+
+Backend:
+
 ```powershell
-cd backend; python -m pytest          # backend test suite
-cd frontend; npm test                 # vitest run
+cd backend
+python -m pytest
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm test
 ```
 
 ## Repository layout
 
 ```text
 ├── frontend/        React + TypeScript + Vite application (presentation only)
-├── backend/         FastAPI + LangGraph processing pipeline
+├── backend/         FastAPI + Python computer-vision processing pipeline
 │   └── app/
 │       ├── api/         HTTP routes
 │       ├── core/        configuration, logging, error handling
 │       ├── schemas/     Pydantic spatial + API contracts
-│       ├── services/    CV pipeline services (validation, depth, normals, features, renderer)
-│       ├── tools/       external provider clients (Groq, optional novel-view)
-│       ├── nodes/       LangGraph node functions
-│       ├── graph.py     LangGraph workflow definition
+│       ├── services/    CV stages (validation, depth, detection, floor plane, layout, renderer)
 │       └── main.py      FastAPI application factory
 ├── artifacts/       local, temporary processing artifacts (git-ignored)
 └── docs/            architecture, API, limitations

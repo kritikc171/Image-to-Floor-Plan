@@ -16,8 +16,9 @@ Rules
 - Floor-plane position, footprint, orientation and dimensions are all
   single-view estimates: heuristic confidences are reported, never
   presented as calibrated measurements.
-- The room boundary is the projected visible floor region (INFERRED);
-  wall segments are its edges; hidden walls are absent, not fabricated.
+- The room boundary is the projectively rectified visible floor region or
+  an explicitly labeled rectangular approximation (INFERRED); hidden walls
+  are absent, not fabricated.
 - Openings are UNCERTAIN border-adjacent edge candidates; they are not
   confirmed doors or windows.
 """
@@ -29,6 +30,7 @@ from typing import Optional
 
 from app.schemas.spatial import (
     EvidenceStatus,
+    GeometryDiagnostics,
     Opening,
     PlanPoint,
     Provenance,
@@ -212,8 +214,9 @@ def build_hypothesis(
             if ev.floor_level:
                 status = EvidenceStatus.INFERRED
                 reason = (
-                    "Position projected from the visible floor under a "
-                    "ground-plane assumption."
+                    "Shape-based category candidate only; the object is not "
+                    "confirmed as this furniture type. Position is projected "
+                    "from the visible floor under a ground-plane assumption."
                 )
 
         if position is not None and boundary_poly is not None:
@@ -264,7 +267,15 @@ def build_hypothesis(
             SpatialObject(
                 id=ev.id,
                 type="furniture",
-                label=ev.label,
+                label=(
+                    ev.label
+                    if is_detection
+                    else (
+                        f"possible {class_name}"
+                        if class_name != "furniture"
+                        else "unclassified furniture"
+                    )
+                ),
                 image_bbox=(
                     {
                         "x_min": ev.bbox[0],
@@ -337,6 +348,10 @@ def build_hypothesis(
                     if features.floorplane_quality != "good"
                     else None
                 ),
+                source_ground_corners=features.source_ground_corners or None,
+                geometry_correction_method=features.geometry_correction_method,
+                geometry_fallback_reason=features.geometry_fallback_reason,
+                geometry_source=features.geometry_source,
             ),
             openings_out,
         )
@@ -393,18 +408,21 @@ def build_hypothesis(
         "Depth is a unitless relative estimate, not metric depth",
         "Object labels are generic geometric descriptions",
         "Heuristic scores are not calibrated probabilities",
-        "Room boundary is the projected visible floor region "
-        "(polygon), not a verified rectangle",
     ]
+    if room_geometry is not None and room_geometry.rectangular_assumption:
+        assumptions.append(
+            f"Room outline correction: {features.geometry_correction_method}; "
+            "true room shape and dimensions are unknown."
+        )
+    else:
+        assumptions.append(
+            "Room boundary is the projected visible floor region, not a "
+            "verified complete room outline."
+        )
     if features.floor_polygon:
         assumptions.append(
             "Object orientation is assumed to face down-plan (0 rad); "
             "not recoverable from a single photo"
-        )
-    if room_geometry is not None and room_geometry.rectangular_assumption:
-        assumptions.append(
-            "Room corners were snapped to a rectangular layout from weak "
-            "edge cues; treat the perimeter as approximate."
         )
     if not detection_available:
         assumptions.append(
@@ -420,9 +438,29 @@ def build_hypothesis(
     if not openings_out:
         open_questions.append("Are there doors or windows in view?")
 
+    geometry_diagnostics = GeometryDiagnostics(
+        geometry_source=features.geometry_source,
+        source_ground_corners=features.source_ground_corners,
+        homography_applied=(
+            features.geometry_correction_method == "projective homography"
+        ),
+        correction_method=features.geometry_correction_method,
+        fallback_reason=features.geometry_fallback_reason,
+        corrected_room_corners=(
+            room_geometry.corners if room_geometry is not None else []
+        ),
+        renderer_perimeter=(
+            room_geometry.perimeter if room_geometry is not None else []
+        ),
+        renderer_wall_segments=(
+            room_geometry.walls if room_geometry is not None else []
+        ),
+    )
+
     return SpatialHypothesis(
         room_boundary=boundary,
         room_geometry=room_geometry,
+        geometry_diagnostics=geometry_diagnostics,
         objects=objects,
         openings=openings_out,
         uncertainty=UncertaintySummary(

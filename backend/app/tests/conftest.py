@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Iterator
 
 _TMP = tempfile.mkdtemp(prefix="floorplan-test-")
 os.environ.setdefault("artifact_root", os.path.join(_TMP, "artifacts"))
@@ -17,7 +18,7 @@ from app.main import app  # noqa: E402
 
 
 @pytest.fixture(scope="session")
-def client() -> TestClient:
+def client() -> Iterator[TestClient]:
     with TestClient(app) as c:
         yield c
 

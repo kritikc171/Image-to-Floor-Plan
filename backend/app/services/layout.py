@@ -81,23 +81,49 @@ def fit_footprint(cx, cy, w, d, poly):
 
 
 def resolve_overlap(r_new, placed, poly):
-    """Return (cx, cy, issue) for the new rect against already placed ones."""
-    for r in placed:
-        ox, oy = rect_overlap(r_new, r)
+    """Make the smallest in-room correction that clears existing footprints."""
+    cx = (r_new[0] + r_new[2]) / 2
+    cy = (r_new[1] + r_new[3]) / 2
+    width = r_new[2] - r_new[0]
+    depth = r_new[3] - r_new[1]
+    candidates = []
+    clearance = 0.005
+
+    for existing in placed:
+        ox, oy = rect_overlap(r_new, existing)
         if ox <= 0 and oy <= 0:
             continue
-        for dx, dy in ((ox, 0), (-ox, 0), (0, oy), (0, -oy)):
-            nx, ny = (r_new[0] + r_new[2]) / 2 + dx, (r_new[1] + r_new[3]) / 2 + dy
-            nw = r_new[2] - r_new[0]
-            nd = r_new[3] - r_new[1]
-            cand = rect(nx, ny, nw, nd)
-            if rect_inside_poly(cand, poly) and not any(
-                rect_overlap(cand, p)[0] > 0 and rect_overlap(cand, p)[1] > 0
-                for p in placed
-            ):
-                return nx, ny, None
-        return (r_new[0] + r_new[2]) / 2, (r_new[1] + r_new[3]) / 2, "overlaps another object; position approximate"
-    return (r_new[0] + r_new[2]) / 2, (r_new[1] + r_new[3]) / 2, None
+        if ox > 0:
+            candidates.extend(
+                ((cx + ox + clearance, cy), (cx - ox - clearance, cy))
+            )
+        if oy > 0:
+            candidates.extend(
+                ((cx, cy + oy + clearance), (cx, cy - oy - clearance))
+            )
+
+    candidates.sort(
+        key=lambda point: (
+            (point[0] - cx) ** 2 + (point[1] - cy) ** 2,
+            point[1],
+            point[0],
+        )
+    )
+    for nx, ny in candidates:
+        candidate = rect(nx, ny, width, depth)
+        if not rect_inside_poly(candidate, poly):
+            continue
+        if any(
+            rect_overlap(candidate, existing)[0] > 0
+            and rect_overlap(candidate, existing)[1] > 0
+            for existing in placed
+        ):
+            continue
+        return nx, ny, None
+
+    if candidates:
+        return cx, cy, "overlaps another object; position approximate"
+    return cx, cy, None
 
 
 def rect_vs_walls(r, walls, radius: float = 0.001):

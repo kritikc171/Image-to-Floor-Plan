@@ -41,6 +41,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.schemas.spatial import (
     EvidenceStatus,
+    Opening,
     SpatialHypothesis,
 )
 
@@ -170,11 +171,15 @@ def render_floorplan(hypothesis: SpatialHypothesis, job_id: str) -> bytes:
 def _plan_region(draw: ImageDraw.ImageDraw) -> dict:
     x0, y0, x1, y1 = PLAN_BOX
     draw.rectangle(PLAN_BOX, fill=PAPER, outline=LINE_LIGHT, width=2)
-    inner_w = x1 - x0 - 2 * PLAN_PAD
-    inner_h = y1 - y0 - 2 * PLAN_PAD
+    available_w = x1 - x0 - 2 * PLAN_PAD
+    available_h = y1 - y0 - 2 * PLAN_PAD
+    # A plan coordinate unit must occupy the same number of pixels on both
+    # axes; otherwise rectangular rooms and furniture are stretched.
+    inner_w = inner_h = min(available_w, available_h)
     return {
         "x0": x0, "y0": y0, "x1": x1, "y1": y1,
-        "inner_x0": x0 + PLAN_PAD, "inner_y0": y0 + PLAN_PAD,
+        "inner_x0": x0 + PLAN_PAD + (available_w - inner_w) / 2,
+        "inner_y0": y0 + PLAN_PAD + (available_h - inner_h) / 2,
         "inner_w": inner_w, "inner_h": inner_h,
     }
 
@@ -225,6 +230,15 @@ def _draw_room(
 
     # Room interior fill.
     draw.polygon(pts, fill=ROOM_TINT)
+    if geometry.rectangular_assumption:
+        min_x = min(point[0] for point in pts)
+        min_y = min(point[1] for point in pts)
+        draw.text(
+            (min_x + 16, min_y - 36),
+            "RECTANGULAR APPROXIMATION",
+            font=_font(14, bold=True),
+            fill=MUTED,
+        )
 
     # Openings projected to pixels, grouped by wall.
     openings_on_wall: dict[str, list[tuple[float, float]]] = {}
